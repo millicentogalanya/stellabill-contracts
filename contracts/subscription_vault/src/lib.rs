@@ -148,10 +148,6 @@ pub struct Subscription {
 /// limit that no real deployment will ever approach.
 pub const MAX_SUBSCRIPTION_ID: u32 = u32::MAX;
 
-
-}
-
-
 /// Validates if a status transition is allowed by the state machine.
 ///
 /// # State Transition Rules
