@@ -16,7 +16,9 @@ const PREPAID: i128 = 50_000_000; // 50 USDC
 
 fn create_token_and_mint(env: &Env, recipient: &Address, amount: i128) -> Address {
     let token_admin = Address::generate(env);
-    let token_addr = env.register_stellar_asset_contract_v2(token_admin.clone()).address();
+    let token_addr = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
     let token_client = soroban_sdk::token::StellarAssetClient::new(env, &token_addr);
     token_client.mint(recipient, &amount);
     token_addr
@@ -30,11 +32,26 @@ fn setup_test_env() -> (Env, SubscriptionVaultClient<'static>, Address, Address)
     let client = SubscriptionVaultClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let min_topup = 1_000_000i128; // 1 USDC
     client.init(&token, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
 
     (env, client, token, admin)
+}
+
+/// Helper used by reentrancy tests: returns (client, token, admin) with env pre-configured.
+fn setup_contract(env: &Env) -> (SubscriptionVaultClient<'_>, Address, Address) {
+    env.mock_all_auths();
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    client.init(&token, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
+    (client, token, admin)
 }
 
 /// Create a test subscription, then patch its status for direct-manipulation tests.
@@ -85,54 +102,130 @@ fn seed_counter(env: &Env, contract_id: &Address, value: u32) {
 
 #[test]
 fn test_validate_status_transition_same_status_is_allowed() {
-    assert!(validate_status_transition(&SubscriptionStatus::Active, &SubscriptionStatus::Active).is_ok());
-    assert!(validate_status_transition(&SubscriptionStatus::Paused, &SubscriptionStatus::Paused).is_ok());
-    assert!(validate_status_transition(&SubscriptionStatus::Cancelled, &SubscriptionStatus::Cancelled).is_ok());
-    assert!(validate_status_transition(&SubscriptionStatus::InsufficientBalance, &SubscriptionStatus::InsufficientBalance).is_ok());
+    assert!(
+        validate_status_transition(&SubscriptionStatus::Active, &SubscriptionStatus::Active)
+            .is_ok()
+    );
+    assert!(
+        validate_status_transition(&SubscriptionStatus::Paused, &SubscriptionStatus::Paused)
+            .is_ok()
+    );
+    assert!(validate_status_transition(
+        &SubscriptionStatus::Cancelled,
+        &SubscriptionStatus::Cancelled
+    )
+    .is_ok());
+    assert!(validate_status_transition(
+        &SubscriptionStatus::InsufficientBalance,
+        &SubscriptionStatus::InsufficientBalance
+    )
+    .is_ok());
 }
 
 #[test]
 fn test_validate_active_transitions() {
-    assert!(validate_status_transition(&SubscriptionStatus::Active, &SubscriptionStatus::Paused).is_ok());
-    assert!(validate_status_transition(&SubscriptionStatus::Active, &SubscriptionStatus::Cancelled).is_ok());
-    assert!(validate_status_transition(&SubscriptionStatus::Active, &SubscriptionStatus::InsufficientBalance).is_ok());
+    assert!(
+        validate_status_transition(&SubscriptionStatus::Active, &SubscriptionStatus::Paused)
+            .is_ok()
+    );
+    assert!(validate_status_transition(
+        &SubscriptionStatus::Active,
+        &SubscriptionStatus::Cancelled
+    )
+    .is_ok());
+    assert!(validate_status_transition(
+        &SubscriptionStatus::Active,
+        &SubscriptionStatus::InsufficientBalance
+    )
+    .is_ok());
 }
 
 #[test]
 fn test_validate_paused_transitions() {
-    assert!(validate_status_transition(&SubscriptionStatus::Paused, &SubscriptionStatus::Active).is_ok());
-    assert!(validate_status_transition(&SubscriptionStatus::Paused, &SubscriptionStatus::Cancelled).is_ok());
+    assert!(
+        validate_status_transition(&SubscriptionStatus::Paused, &SubscriptionStatus::Active)
+            .is_ok()
+    );
+    assert!(validate_status_transition(
+        &SubscriptionStatus::Paused,
+        &SubscriptionStatus::Cancelled
+    )
+    .is_ok());
     assert_eq!(
-        validate_status_transition(&SubscriptionStatus::Paused, &SubscriptionStatus::InsufficientBalance),
+        validate_status_transition(
+            &SubscriptionStatus::Paused,
+            &SubscriptionStatus::InsufficientBalance
+        ),
         Err(Error::InvalidStatusTransition)
     );
 }
 
 #[test]
 fn test_validate_insufficient_balance_transitions() {
-    assert!(validate_status_transition(&SubscriptionStatus::InsufficientBalance, &SubscriptionStatus::Active).is_ok());
-    assert!(validate_status_transition(&SubscriptionStatus::InsufficientBalance, &SubscriptionStatus::Cancelled).is_ok());
+    assert!(validate_status_transition(
+        &SubscriptionStatus::InsufficientBalance,
+        &SubscriptionStatus::Active
+    )
+    .is_ok());
+    assert!(validate_status_transition(
+        &SubscriptionStatus::InsufficientBalance,
+        &SubscriptionStatus::Cancelled
+    )
+    .is_ok());
     assert_eq!(
-        validate_status_transition(&SubscriptionStatus::InsufficientBalance, &SubscriptionStatus::Paused),
+        validate_status_transition(
+            &SubscriptionStatus::InsufficientBalance,
+            &SubscriptionStatus::Paused
+        ),
         Err(Error::InvalidStatusTransition)
     );
 }
 
 #[test]
 fn test_validate_cancelled_transitions_all_blocked() {
-    assert_eq!(validate_status_transition(&SubscriptionStatus::Cancelled, &SubscriptionStatus::Active), Err(Error::InvalidStatusTransition));
-    assert_eq!(validate_status_transition(&SubscriptionStatus::Cancelled, &SubscriptionStatus::Paused), Err(Error::InvalidStatusTransition));
-    assert_eq!(validate_status_transition(&SubscriptionStatus::Cancelled, &SubscriptionStatus::InsufficientBalance), Err(Error::InvalidStatusTransition));
+    assert_eq!(
+        validate_status_transition(&SubscriptionStatus::Cancelled, &SubscriptionStatus::Active),
+        Err(Error::InvalidStatusTransition)
+    );
+    assert_eq!(
+        validate_status_transition(&SubscriptionStatus::Cancelled, &SubscriptionStatus::Paused),
+        Err(Error::InvalidStatusTransition)
+    );
+    assert_eq!(
+        validate_status_transition(
+            &SubscriptionStatus::Cancelled,
+            &SubscriptionStatus::InsufficientBalance
+        ),
+        Err(Error::InvalidStatusTransition)
+    );
 }
 
 #[test]
 fn test_can_transition_helper() {
-    assert!(can_transition(&SubscriptionStatus::Active, &SubscriptionStatus::Paused));
-    assert!(can_transition(&SubscriptionStatus::Active, &SubscriptionStatus::Cancelled));
-    assert!(can_transition(&SubscriptionStatus::Paused, &SubscriptionStatus::Active));
-    assert!(!can_transition(&SubscriptionStatus::Cancelled, &SubscriptionStatus::Active));
-    assert!(!can_transition(&SubscriptionStatus::Cancelled, &SubscriptionStatus::Paused));
-    assert!(!can_transition(&SubscriptionStatus::Paused, &SubscriptionStatus::InsufficientBalance));
+    assert!(can_transition(
+        &SubscriptionStatus::Active,
+        &SubscriptionStatus::Paused
+    ));
+    assert!(can_transition(
+        &SubscriptionStatus::Active,
+        &SubscriptionStatus::Cancelled
+    ));
+    assert!(can_transition(
+        &SubscriptionStatus::Paused,
+        &SubscriptionStatus::Active
+    ));
+    assert!(!can_transition(
+        &SubscriptionStatus::Cancelled,
+        &SubscriptionStatus::Active
+    ));
+    assert!(!can_transition(
+        &SubscriptionStatus::Cancelled,
+        &SubscriptionStatus::Paused
+    ));
+    assert!(!can_transition(
+        &SubscriptionStatus::Paused,
+        &SubscriptionStatus::InsufficientBalance
+    ));
 }
 
 #[test]
@@ -147,7 +240,10 @@ fn test_get_allowed_transitions() {
     assert!(paused_targets.contains(&SubscriptionStatus::Active));
     assert!(paused_targets.contains(&SubscriptionStatus::Cancelled));
 
-    assert_eq!(get_allowed_transitions(&SubscriptionStatus::Cancelled).len(), 0);
+    assert_eq!(
+        get_allowed_transitions(&SubscriptionStatus::Cancelled).len(),
+        0
+    );
 
     let ib_targets = get_allowed_transitions(&SubscriptionStatus::InsufficientBalance);
     assert_eq!(ib_targets.len(), 2);
@@ -160,7 +256,10 @@ fn test_pause_subscription_from_active() {
     let (env, client, _, _) = setup_test_env();
     let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     client.pause_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Paused);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Paused
+    );
 }
 
 #[test]
@@ -178,7 +277,10 @@ fn test_pause_subscription_from_paused_is_idempotent() {
     let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     client.pause_subscription(&id, &subscriber);
     client.pause_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Paused);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Paused
+    );
 }
 
 #[test]
@@ -186,7 +288,10 @@ fn test_cancel_subscription_from_active() {
     let (env, client, _, _) = setup_test_env();
     let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     client.cancel_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 }
 
 #[test]
@@ -195,7 +300,10 @@ fn test_cancel_subscription_from_paused() {
     let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     client.pause_subscription(&id, &subscriber);
     client.cancel_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 }
 
 #[test]
@@ -204,7 +312,10 @@ fn test_cancel_subscription_from_cancelled_is_idempotent() {
     let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     client.cancel_subscription(&id, &subscriber);
     client.cancel_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 }
 
 #[test]
@@ -213,7 +324,10 @@ fn test_resume_subscription_from_paused() {
     let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     client.pause_subscription(&id, &subscriber);
     client.resume_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Active);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Active
+    );
 }
 
 #[test]
@@ -230,11 +344,20 @@ fn test_full_lifecycle_active_pause_resume() {
     let (env, client, _, _) = setup_test_env();
     let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     client.pause_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Paused);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Paused
+    );
     client.resume_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Active);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Active
+    );
     client.pause_subscription(&id, &subscriber);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Paused);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Paused
+    );
 }
 
 #[test]
@@ -242,16 +365,24 @@ fn test_all_valid_transitions_coverage() {
     // Active -> Paused
     {
         let (env, client, _, _) = setup_test_env();
-        let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+        let (id, subscriber, _) =
+            create_test_subscription(&env, &client, SubscriptionStatus::Active);
         client.pause_subscription(&id, &subscriber);
-        assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Paused);
+        assert_eq!(
+            client.get_subscription(&id).status,
+            SubscriptionStatus::Paused
+        );
     }
     // Active -> Cancelled
     {
         let (env, client, _, _) = setup_test_env();
-        let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+        let (id, subscriber, _) =
+            create_test_subscription(&env, &client, SubscriptionStatus::Active);
         client.cancel_subscription(&id, &subscriber);
-        assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+        assert_eq!(
+            client.get_subscription(&id).status,
+            SubscriptionStatus::Cancelled
+        );
     }
     // Active -> InsufficientBalance (direct storage patch)
     {
@@ -259,44 +390,69 @@ fn test_all_valid_transitions_coverage() {
         let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
         let mut sub = client.get_subscription(&id);
         sub.status = SubscriptionStatus::InsufficientBalance;
-        env.as_contract(&client.address, || { env.storage().instance().set(&id, &sub); });
-        assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::InsufficientBalance);
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&id, &sub);
+        });
+        assert_eq!(
+            client.get_subscription(&id).status,
+            SubscriptionStatus::InsufficientBalance
+        );
     }
     // Paused -> Active
     {
         let (env, client, _, _) = setup_test_env();
-        let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+        let (id, subscriber, _) =
+            create_test_subscription(&env, &client, SubscriptionStatus::Active);
         client.pause_subscription(&id, &subscriber);
         client.resume_subscription(&id, &subscriber);
-        assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Active);
+        assert_eq!(
+            client.get_subscription(&id).status,
+            SubscriptionStatus::Active
+        );
     }
     // Paused -> Cancelled
     {
         let (env, client, _, _) = setup_test_env();
-        let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+        let (id, subscriber, _) =
+            create_test_subscription(&env, &client, SubscriptionStatus::Active);
         client.pause_subscription(&id, &subscriber);
         client.cancel_subscription(&id, &subscriber);
-        assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+        assert_eq!(
+            client.get_subscription(&id).status,
+            SubscriptionStatus::Cancelled
+        );
     }
     // InsufficientBalance -> Active
     {
         let (env, client, _, _) = setup_test_env();
-        let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+        let (id, subscriber, _) =
+            create_test_subscription(&env, &client, SubscriptionStatus::Active);
         let mut sub = client.get_subscription(&id);
         sub.status = SubscriptionStatus::InsufficientBalance;
-        env.as_contract(&client.address, || { env.storage().instance().set(&id, &sub); });
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&id, &sub);
+        });
         client.resume_subscription(&id, &subscriber);
-        assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Active);
+        assert_eq!(
+            client.get_subscription(&id).status,
+            SubscriptionStatus::Active
+        );
     }
     // InsufficientBalance -> Cancelled
     {
         let (env, client, _, _) = setup_test_env();
-        let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
+        let (id, subscriber, _) =
+            create_test_subscription(&env, &client, SubscriptionStatus::Active);
         let mut sub = client.get_subscription(&id);
         sub.status = SubscriptionStatus::InsufficientBalance;
-        env.as_contract(&client.address, || { env.storage().instance().set(&id, &sub); });
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&id, &sub);
+        });
         client.cancel_subscription(&id, &subscriber);
-        assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+        assert_eq!(
+            client.get_subscription(&id).status,
+            SubscriptionStatus::Cancelled
+        );
     }
 }
 
@@ -316,7 +472,9 @@ fn test_invalid_insufficient_balance_to_paused() {
     let (id, subscriber, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     let mut sub = client.get_subscription(&id);
     sub.status = SubscriptionStatus::InsufficientBalance;
-    env.as_contract(&client.address, || { env.storage().instance().set(&id, &sub); });
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&id, &sub);
+    });
     client.pause_subscription(&id, &subscriber);
 }
 
@@ -400,9 +558,13 @@ fn test_cancel_subscription_by_subscriber() {
     let (env, client, _, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
-    let sub_id = client.create_subscription(&subscriber, &merchant, &1000, &86400, &true, &None::<i128>);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &1000, &86400, &true, &None::<i128>);
     client.cancel_subscription(&sub_id, &subscriber);
-    assert_eq!(client.get_subscription(&sub_id).status, SubscriptionStatus::Cancelled);
+    assert_eq!(
+        client.get_subscription(&sub_id).status,
+        SubscriptionStatus::Cancelled
+    );
 }
 
 #[test]
@@ -411,7 +573,8 @@ fn test_cancel_subscription_unauthorized() {
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
     let other = Address::generate(&env);
-    let sub_id = client.create_subscription(&subscriber, &merchant, &1000, &86400, &true, &None::<i128>);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &1000, &86400, &true, &None::<i128>);
     let result = client.try_cancel_subscription(&sub_id, &other);
     assert_eq!(result, Err(Ok(Error::Forbidden)));
 }
@@ -422,7 +585,9 @@ fn test_withdraw_subscriber_funds() {
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_contract = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let token = soroban_sdk::token::Client::new(&env, &token_contract);
     let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_contract);
 
@@ -432,10 +597,17 @@ fn test_withdraw_subscriber_funds() {
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
 
-    client.init(&token_contract, &6, &vault_admin, &1000, &(7 * 24 * 60 * 60));
+    client.init(
+        &token_contract,
+        &6,
+        &vault_admin,
+        &1000,
+        &(7 * 24 * 60 * 60),
+    );
     token_admin.mint(&subscriber, &5000);
 
-    let sub_id = client.create_subscription(&subscriber, &merchant, &1000, &86400, &true, &None::<i128>);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &1000, &86400, &true, &None::<i128>);
     client.deposit_funds(&sub_id, &subscriber, &5000);
     client.cancel_subscription(&sub_id, &subscriber);
     client.withdraw_subscriber_funds(&sub_id, &subscriber);
@@ -456,13 +628,22 @@ fn test_min_topup_below_threshold() {
     let client = SubscriptionVaultClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
     let min_topup = 5_000_000i128;
 
     client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
-    let id = client.create_subscription(&subscriber, &merchant, &10_000_000i128, &(30*24*60*60), &false, &None::<i128>);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &10_000_000i128,
+        &(30 * 24 * 60 * 60),
+        &false,
+        &None::<i128>,
+    );
     client.cancel_subscription(&id, &merchant);
     let result = client.try_deposit_funds(&id, &subscriber, &4_999_999);
     assert!(result.is_err());
@@ -476,7 +657,9 @@ fn test_min_topup_exactly_at_threshold() {
     let client = SubscriptionVaultClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
@@ -484,8 +667,17 @@ fn test_min_topup_exactly_at_threshold() {
 
     client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
     token_admin.mint(&subscriber, &min_topup);
-    let id = client.create_subscription(&subscriber, &merchant, &10_000_000i128, &(30*24*60*60), &false, &None::<i128>);
-    assert!(client.try_deposit_funds(&id, &subscriber, &min_topup).is_ok());
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &10_000_000i128,
+        &(30 * 24 * 60 * 60),
+        &false,
+        &None::<i128>,
+    );
+    assert!(client
+        .try_deposit_funds(&id, &subscriber, &min_topup)
+        .is_ok());
 }
 
 #[test]
@@ -496,7 +688,9 @@ fn test_min_topup_above_threshold() {
     let client = SubscriptionVaultClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    let token_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
@@ -505,8 +699,17 @@ fn test_min_topup_above_threshold() {
 
     client.init(&token_addr, &6, &admin, &min_topup, &(7 * 24 * 60 * 60));
     token_admin.mint(&subscriber, &deposit_amount);
-    let id = client.create_subscription(&subscriber, &merchant, &deposit_amount, &(30*24*60*60), &false, &None::<i128>);
-    assert!(client.try_deposit_funds(&id, &subscriber, &deposit_amount).is_ok());
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &deposit_amount,
+        &(30 * 24 * 60 * 60),
+        &false,
+        &None::<i128>,
+    );
+    assert!(client
+        .try_deposit_funds(&id, &subscriber, &deposit_amount)
+        .is_ok());
 }
 
 // ── Usage-charge tests ─────────────────────────────────────────────────────────
@@ -520,7 +723,14 @@ fn setup_usage(env: &Env) -> (SubscriptionVaultClient<'_>, u32) {
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
     env.ledger().set_timestamp(T0);
-    let id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &true, &None::<i128>);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &true,
+        &None::<i128>,
+    );
     seed_balance(env, &client, id, PREPAID);
     (client, id)
 }
@@ -534,7 +744,14 @@ fn setup_interval(env: &Env, interval: u64) -> (SubscriptionVaultClient<'_>, u32
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
     env.ledger().set_timestamp(T0);
-    let id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &interval, &false, &None::<i128>);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &interval,
+        &false,
+        &None::<i128>,
+    );
     seed_balance(env, &client, id, PREPAID);
     (client, id)
 }
@@ -585,8 +802,14 @@ fn test_usage_charge_rejected_invalid_amount() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, id) = setup_usage(&env);
-    assert_eq!(client.try_charge_usage(&id, &0i128), Err(Ok(Error::InvalidAmount)));
-    assert_eq!(client.try_charge_usage(&id, &(-1i128)), Err(Ok(Error::InvalidAmount)));
+    assert_eq!(
+        client.try_charge_usage(&id, &0i128),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        client.try_charge_usage(&id, &(-1i128)),
+        Err(Ok(Error::InvalidAmount))
+    );
     assert_eq!(client.get_subscription(&id).prepaid_balance, PREPAID);
 }
 
@@ -696,7 +919,14 @@ fn test_get_next_charge_info_contract_method() {
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
     env.ledger().with_mut(|li| li.timestamp = 1000);
-    let id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
     let info = client.get_next_charge_info(&id);
     assert!(info.is_charge_expected);
     assert_eq!(info.next_charge_timestamp, 1000 + INTERVAL);
@@ -714,7 +944,14 @@ fn test_get_next_charge_info_subscription_not_found() {
 fn quick_create(env: &Env, client: &SubscriptionVaultClient) -> u32 {
     let subscriber = Address::generate(env);
     let merchant = Address::generate(env);
-    client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>)
+    client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    )
 }
 
 #[test]
@@ -764,7 +1001,14 @@ fn test_id_at_max_returns_limit_reached() {
     seed_counter(&env, &contract_id, MAX_SUBSCRIPTION_ID);
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
-    let result = client.try_create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    let result = client.try_create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
     assert!(
         matches!(result, Err(Ok(Error::SubscriptionLimitReached))),
         "expected SubscriptionLimitReached, got {:?}",
@@ -785,7 +1029,14 @@ fn test_no_id_reuse_after_limit() {
     for attempt in 0..3 {
         let subscriber = Address::generate(&env);
         let merchant = Address::generate(&env);
-        let result = client.try_create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+        let result = client.try_create_subscription(
+            &subscriber,
+            &merchant,
+            &AMOUNT,
+            &INTERVAL,
+            &false,
+            &None::<i128>,
+        );
         assert!(
             matches!(result, Err(Ok(Error::SubscriptionLimitReached))),
             "attempt {attempt}: expected SubscriptionLimitReached"
@@ -799,7 +1050,12 @@ fn test_no_id_reuse_after_limit() {
 fn test_recover_stranded_funds_successful() {
     let (env, client, _, admin) = setup_test_env();
     let recipient = Address::generate(&env);
-    let result = client.try_recover_stranded_funds(&admin, &recipient, &50_000_000i128, &RecoveryReason::AccidentalTransfer);
+    let result = client.try_recover_stranded_funds(
+        &admin,
+        &recipient,
+        &50_000_000i128,
+        &RecoveryReason::AccidentalTransfer,
+    );
     assert!(result.is_ok());
     assert!(!env.events().all().is_empty());
 }
@@ -810,7 +1066,12 @@ fn test_recover_stranded_funds_unauthorized_caller() {
     let (env, client, _, _) = setup_test_env();
     let non_admin = Address::generate(&env);
     let recipient = Address::generate(&env);
-    client.recover_stranded_funds(&non_admin, &recipient, &10_000_000i128, &RecoveryReason::AccidentalTransfer);
+    client.recover_stranded_funds(
+        &non_admin,
+        &recipient,
+        &10_000_000i128,
+        &RecoveryReason::AccidentalTransfer,
+    );
 }
 
 #[test]
@@ -825,9 +1086,30 @@ fn test_recover_stranded_funds_zero_amount() {
 fn test_recover_stranded_funds_all_recovery_reasons() {
     let (env, client, _, admin) = setup_test_env();
     let recipient = Address::generate(&env);
-    assert!(client.try_recover_stranded_funds(&admin, &recipient, &1_000_000i128, &RecoveryReason::AccidentalTransfer).is_ok());
-    assert!(client.try_recover_stranded_funds(&admin, &recipient, &1_000_000i128, &RecoveryReason::DeprecatedFlow).is_ok());
-    assert!(client.try_recover_stranded_funds(&admin, &recipient, &1_000_000i128, &RecoveryReason::UnreachableSubscriber).is_ok());
+    assert!(client
+        .try_recover_stranded_funds(
+            &admin,
+            &recipient,
+            &1_000_000i128,
+            &RecoveryReason::AccidentalTransfer
+        )
+        .is_ok());
+    assert!(client
+        .try_recover_stranded_funds(
+            &admin,
+            &recipient,
+            &1_000_000i128,
+            &RecoveryReason::DeprecatedFlow
+        )
+        .is_ok());
+    assert!(client
+        .try_recover_stranded_funds(
+            &admin,
+            &recipient,
+            &1_000_000i128,
+            &RecoveryReason::UnreachableSubscriber
+        )
+        .is_ok());
 }
 
 #[test]
@@ -851,9 +1133,23 @@ fn setup_batch_env(env: &Env) -> (SubscriptionVaultClient<'static>, Address, u32
     let admin = Address::generate(env);
     client.init(&token, &6, &admin, &1_000_000i128, &(7 * 24 * 60 * 60));
     let merchant = Address::generate(env);
-    let id0 = client.create_subscription(&subscriber, &merchant, &1000i128, &INTERVAL, &false, &None::<i128>);
+    let id0 = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
     client.deposit_funds(&id0, &subscriber, &10_000_000i128);
-    let id1 = client.create_subscription(&subscriber, &merchant, &1000i128, &INTERVAL, &false, &None::<i128>);
+    let id1 = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
     env.ledger().set_timestamp(T0 + INTERVAL);
     (client, admin, id0, id1)
 }
@@ -883,7 +1179,14 @@ fn test_batch_charge_small_batch_5_subscriptions() {
     let merchant = Address::generate(&env);
     let mut ids = SorobanVec::<u32>::new(&env);
     for _ in 0..5 {
-        let id = client.create_subscription(&subscriber, &merchant, &1000i128, &INTERVAL, &false, &None::<i128>);
+        let id = client.create_subscription(
+            &subscriber,
+            &merchant,
+            &1000i128,
+            &INTERVAL,
+            &false,
+            &None::<i128>,
+        );
         client.deposit_funds(&id, &subscriber, &10_000_000i128);
         ids.push_back(id);
     }
@@ -977,7 +1280,7 @@ fn test_low_cap_two_charges_then_cancelled() {
 
     // Charge 1
     env.ledger().set_timestamp(T0 + INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
     let sub = client.get_subscription(&id);
     assert_eq!(sub.lifetime_charged, AMOUNT);
     assert_eq!(sub.status, SubscriptionStatus::Active);
@@ -989,7 +1292,7 @@ fn test_low_cap_two_charges_then_cancelled() {
 
     // Charge 2 — reaches exact cap, subscription should be cancelled
     env.ledger().set_timestamp(T0 + 2 * INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
     let sub = client.get_subscription(&id);
     assert_eq!(sub.lifetime_charged, cap);
     assert_eq!(sub.status, SubscriptionStatus::Cancelled);
@@ -1010,15 +1313,18 @@ fn test_low_cap_charge_after_cap_reached_returns_error() {
     let (client, id, _) = setup_capped(&env, AMOUNT, INTERVAL, Some(cap));
 
     env.ledger().set_timestamp(T0 + INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
     env.ledger().set_timestamp(T0 + 2 * INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
     // Subscription is now Cancelled
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 
     // 3rd charge attempt on Cancelled sub
     env.ledger().set_timestamp(T0 + 3 * INTERVAL);
-    let result = client.try_charge_subscription(&id, &None);
+    let result = client.try_charge_subscription(&id);
     assert_eq!(result, Err(Ok(Error::NotActive)));
 }
 
@@ -1033,7 +1339,7 @@ fn test_medium_cap_five_charges_tracking() {
 
     for i in 1u64..=4 {
         env.ledger().set_timestamp(T0 + i * INTERVAL);
-        client.charge_subscription(&id, &None);
+        client.charge_subscription(&id);
         let sub = client.get_subscription(&id);
         assert_eq!(sub.lifetime_charged, AMOUNT * i as i128);
         assert_eq!(sub.status, SubscriptionStatus::Active);
@@ -1041,7 +1347,7 @@ fn test_medium_cap_five_charges_tracking() {
 
     // 5th charge hits cap exactly
     env.ledger().set_timestamp(T0 + 5 * INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
     let sub = client.get_subscription(&id);
     assert_eq!(sub.lifetime_charged, cap);
     assert_eq!(sub.status, SubscriptionStatus::Cancelled);
@@ -1060,7 +1366,7 @@ fn test_medium_cap_fractional_multiple_blocks_charge() {
 
     // First charge succeeds
     env.ledger().set_timestamp(T0 + INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
     let sub = client.get_subscription(&id);
     assert_eq!(sub.lifetime_charged, AMOUNT);
     assert_eq!(sub.status, SubscriptionStatus::Active);
@@ -1068,9 +1374,16 @@ fn test_medium_cap_fractional_multiple_blocks_charge() {
     // Second charge would exceed cap (remaining = 5 USDC < 10 USDC amount).
     // Returns Ok() but cancels the subscription so the state persists.
     env.ledger().set_timestamp(T0 + 2 * INTERVAL);
-    let result = client.try_charge_subscription(&id, &None);
-    assert!(result.is_ok(), "expected Ok on cap-exceeded pre-check, got {:?}", result);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    let result = client.try_charge_subscription(&id);
+    assert!(
+        result.is_ok(),
+        "expected Ok on cap-exceeded pre-check, got {:?}",
+        result
+    );
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 }
 
 /// VERY HIGH CAP: cap = 1_000 × AMOUNT. After 3 charges it is nowhere near reached.
@@ -1084,7 +1397,7 @@ fn test_very_high_cap_not_reached_after_many_charges() {
 
     for i in 1u64..=10 {
         env.ledger().set_timestamp(T0 + i * INTERVAL);
-        client.charge_subscription(&id, &None);
+        client.charge_subscription(&id);
     }
 
     let sub = client.get_subscription(&id);
@@ -1106,10 +1419,13 @@ fn test_very_high_cap_max_i128_never_reached() {
 
     for i in 1u64..=5 {
         env.ledger().set_timestamp(T0 + i * INTERVAL);
-        client.charge_subscription(&id, &None);
+        client.charge_subscription(&id);
     }
 
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Active);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Active
+    );
 }
 
 /// Cap reached event is emitted when cap hit exactly.
@@ -1122,12 +1438,15 @@ fn test_cap_reached_event_emitted_on_exact_cap() {
     let (client, id, _) = setup_capped(&env, AMOUNT, INTERVAL, Some(cap));
 
     env.ledger().set_timestamp(T0 + INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
 
     let events = env.events().all();
     assert!(!events.is_empty());
     // Subscription is cancelled — confirms cap event fired
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 }
 
 /// Cap enforced when charge would exceed (not just reach) it.
@@ -1142,16 +1461,23 @@ fn test_cap_blocks_overrun_charge() {
     let (client, id, _) = setup_capped(&env, AMOUNT, INTERVAL, Some(cap));
 
     env.ledger().set_timestamp(T0 + INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
     env.ledger().set_timestamp(T0 + 2 * INTERVAL);
-    client.charge_subscription(&id, &None);
+    client.charge_subscription(&id);
 
     // 3rd charge: remaining = 5 USDC < 10 USDC → cap pre-check fires,
     // subscription cancelled, Ok(()) returned so cancellation persists.
     env.ledger().set_timestamp(T0 + 3 * INTERVAL);
-    let result = client.try_charge_subscription(&id, &None);
-    assert!(result.is_ok(), "expected Ok on cap-overrun pre-check, got {:?}", result);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    let result = client.try_charge_subscription(&id);
+    assert!(
+        result.is_ok(),
+        "expected Ok on cap-overrun pre-check, got {:?}",
+        result
+    );
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 }
 
 /// Usage charges also count toward lifetime_charged.
@@ -1171,7 +1497,14 @@ fn test_cap_enforced_for_usage_charges() {
 
     let merchant = Address::generate(&env);
     env.ledger().set_timestamp(T0);
-    let id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &true, &Some(cap));
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &true,
+        &Some(cap),
+    );
     client.deposit_funds(&id, &subscriber, &1_000_000_000i128);
 
     // Usage charge 1: 10 USDC
@@ -1183,8 +1516,15 @@ fn test_cap_enforced_for_usage_charges() {
     // Usage charge 2: 6 USDC would exceed cap (remaining = 5 USDC).
     // Returns Ok() and cancels subscription so state persists.
     let result = client.try_charge_usage(&id, &6_000_000i128);
-    assert!(result.is_ok(), "expected Ok on cap-exceeded usage pre-check, got {:?}", result);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    assert!(
+        result.is_ok(),
+        "expected Ok on cap-exceeded usage pre-check, got {:?}",
+        result
+    );
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 }
 
 /// Usage charge that exactly hits cap cancels subscription.
@@ -1203,7 +1543,14 @@ fn test_cap_exact_hit_usage_cancels() {
     client.init(&token, &6, &admin, &1_000_000i128, &0u64);
 
     let merchant = Address::generate(&env);
-    let id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &true, &Some(cap));
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &true,
+        &Some(cap),
+    );
     client.deposit_funds(&id, &subscriber, &1_000_000_000i128);
 
     // Exact hit
@@ -1272,7 +1619,9 @@ fn test_cap_cancelled_subscriber_can_withdraw() {
     let client = SubscriptionVaultClient::new(&env, &contract_id);
 
     let subscriber = Address::generate(&env);
-    let token_addr = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+    let token_addr = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
     let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
     let token = soroban_sdk::token::Client::new(&env, &token_addr);
     token_admin.mint(&subscriber, &1_000_000_000i128);
@@ -1282,19 +1631,32 @@ fn test_cap_cancelled_subscriber_can_withdraw() {
     client.init(&token_addr, &6, &admin, &1_000_000i128, &0u64);
 
     env.ledger().set_timestamp(T0);
-    let id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &Some(cap));
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &Some(cap),
+    );
     client.deposit_funds(&id, &subscriber, &100_000_000i128);
 
     // Charge once — hits cap, subscription cancelled
     env.ledger().set_timestamp(T0 + INTERVAL);
-    client.charge_subscription(&id, &None);
-    assert_eq!(client.get_subscription(&id).status, SubscriptionStatus::Cancelled);
+    client.charge_subscription(&id);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Cancelled
+    );
 
     // Subscriber withdraws remaining balance
     let before = token.balance(&subscriber);
     client.withdraw_subscriber_funds(&id, &subscriber);
     let after = token.balance(&subscriber);
-    assert!(after > before, "subscriber should recover remaining prepaid");
+    assert!(
+        after > before,
+        "subscriber should recover remaining prepaid"
+    );
     assert_eq!(client.get_subscription(&id).prepaid_balance, 0);
 }
 
@@ -1315,11 +1677,25 @@ fn test_batch_charge_respects_lifetime_cap() {
     env.ledger().set_timestamp(T0);
 
     // Uncapped subscription
-    let id_uncapped = client.create_subscription(&subscriber, &merchant, &1000i128, &INTERVAL, &false, &None::<i128>);
+    let id_uncapped = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
     client.deposit_funds(&id_uncapped, &subscriber, &100_000_000i128);
 
     // Capped subscription: cap = 1 charge
-    let id_capped = client.create_subscription(&subscriber, &merchant, &1000i128, &INTERVAL, &false, &Some(1000i128));
+    let id_capped = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1000i128,
+        &INTERVAL,
+        &false,
+        &Some(1000i128),
+    );
     client.deposit_funds(&id_capped, &subscriber, &100_000_000i128);
 
     env.ledger().set_timestamp(T0 + INTERVAL);
@@ -1354,7 +1730,14 @@ fn test_create_subscription_zero_cap_rejected() {
     let (env, client, _, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
-    let result = client.try_create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &Some(0i128));
+    let result = client.try_create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &Some(0i128),
+    );
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
 
@@ -1364,7 +1747,14 @@ fn test_create_subscription_negative_cap_rejected() {
     let (env, client, _, _) = setup_test_env();
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
-    let result = client.try_create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &Some(-1i128));
+    let result = client.try_create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &Some(-1i128),
+    );
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
 
@@ -1387,11 +1777,13 @@ fn test_estimate_topup_subscription_not_found() {
 
 #[test]
 fn test_deposit_funds_state_committed_before_transfer() {
-    let env = Env::new();
-    let (client, token, admin) = setup_contract(&env);
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, _admin) = setup_contract(&env);
 
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &100_000_000i128);
 
     // Create subscription
     let sub_id = client.create_subscription(
@@ -1418,11 +1810,15 @@ fn test_deposit_funds_state_committed_before_transfer() {
 
 #[test]
 fn test_withdraw_merchant_funds_state_committed_before_transfer() {
-    let env = Env::new();
-    let (client, token, admin) = setup_contract(&env);
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, _admin) = setup_contract(&env);
 
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    let token_sac = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    // Mint tokens to the contract to simulate prior deposits/charges funding it
+    token_sac.mint(&client.address, &100_000_000i128);
 
     // Create subscription with initial balance
     let sub_id = client.create_subscription(
@@ -1437,7 +1833,7 @@ fn test_withdraw_merchant_funds_state_committed_before_transfer() {
     // Mock a charge by directly crediting merchant balance
     // In real scenario, this happens via charging
     let env_inner = &env;
-    env_inner.as_contract(&client.address(), || {
+    env_inner.as_contract(&client.address, || {
         crate::merchant::credit_merchant_balance(env_inner, &merchant, 50_000000i128).unwrap();
     });
 
@@ -1455,11 +1851,13 @@ fn test_withdraw_merchant_funds_state_committed_before_transfer() {
 
 #[test]
 fn test_withdraw_subscriber_funds_state_committed_before_transfer() {
-    let env = Env::new();
-    let (client, token, admin) = setup_contract(&env);
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, _admin) = setup_contract(&env);
 
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &100_000_000i128);
 
     // Create subscription
     let sub_id = client.create_subscription(
@@ -1489,11 +1887,13 @@ fn test_withdraw_subscriber_funds_state_committed_before_transfer() {
 
 #[test]
 fn test_multiple_deposits_maintain_consistent_state() {
-    let env = Env::new();
-    let (client, token, admin) = setup_contract(&env);
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, _admin) = setup_contract(&env);
 
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &100_000_000i128);
 
     let sub_id = client.create_subscription(
         &subscriber,
@@ -1520,15 +1920,18 @@ fn test_multiple_deposits_maintain_consistent_state() {
 
 #[test]
 fn test_charge_and_withdrawal_atomic_sequence() {
-    let env = Env::new();
-    let (client, token, admin) = setup_contract(&env);
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token, _admin) = setup_contract(&env);
 
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &100_000_000i128);
     const INTERVAL: u64 = 30 * 24 * 60 * 60;
     const AMOUNT: i128 = 10_000000i128;
 
-    let sub_id = client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    let sub_id =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
 
     // Deposit enough for one charge
     client.deposit_funds(&sub_id, &subscriber, &50_000000i128);
@@ -1556,14 +1959,15 @@ fn test_reentrancy_protection_documentation() {
     //
     // See docs/reentrancy.md for full analysis
 
-    let env = Env::new();
-    let (client, _token, _admin) = setup_contract(&env);
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_client, _token, _admin) = setup_contract(&env);
 
     // The subscription vault is designed to be safe even if the USDC token
     // contract attempts callbacks:
     // - deposit_funds: updates balance before transfer ✓
     // - withdraw_merchant_funds: updates balance before transfer ✓
     // - withdraw_subscriber_funds: updates balance before transfer ✓
-    
+
     assert!(true); // Placeholder to indicate test passed
 }

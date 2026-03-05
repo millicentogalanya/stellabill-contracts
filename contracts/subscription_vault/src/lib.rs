@@ -13,254 +13,12 @@ mod charge_core;
 mod merchant;
 mod queries;
 mod reentrancy;
+pub mod safe_math;
 mod state_machine;
 mod subscription;
 mod types;
 
-
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
-
-#[contracterror]
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum Error {
-    NotFound = 404,
-    Unauthorized = 401,
-    InvalidStatusTransition = 400,
-    BelowMinimumTopup = 402,
-
-    /// Charge attempt was made after the subscription's expiration timestamp.
-    SubscriptionExpired = 410,
-    /// The contract has allocated [`MAX_SUBSCRIPTION_ID`] subscriptions and
-    /// cannot issue any more IDs. This prevents `u32` counter overflow.
-    SubscriptionLimitReached = 429,
-
-    RecoveryNotAllowed = 403,
-    InvalidRecoveryAmount = 405,
-
-}
-
-/// Represents the lifecycle state of a subscription.
-///
-/// # State Machine
-///
-/// The subscription status follows a defined state machine with specific allowed transitions:
-///
-/// - **Active**: Subscription is active and charges can be processed.
-///   - Can transition to: `Paused`, `Cancelled`, `InsufficientBalance`
-///
-/// - **Paused**: Subscription is temporarily suspended, no charges are processed.
-///   - Can transition to: `Active`, `Cancelled`
-///
-/// - **Cancelled**: Subscription is permanently terminated, no further changes allowed.
-///   - No outgoing transitions (terminal state)
-///
-/// - **InsufficientBalance**: Subscription failed due to insufficient funds.
-///   - Can transition to: `Active` (after deposit), `Cancelled`
-///
-/// Invalid transitions (e.g., `Cancelled` -> `Active`) are rejected with
-/// [`Error::InvalidStatusTransition`].
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SubscriptionStatus {
-    /// Subscription is active and ready for charging.
-    Active = 0,
-    /// Subscription is temporarily paused, no charges processed.
-    Paused = 1,
-    /// Subscription is permanently cancelled (terminal state).
-    Cancelled = 2,
-    /// Subscription failed due to insufficient balance for charging.
-    InsufficientBalance = 3,
-}
-
-
-/// Represents the reason for stranded funds that can be recovered by admin.
-///
-/// This enum documents the specific, well-defined cases where funds may become
-/// stranded in the contract and require administrative intervention. Each case
-/// must be carefully audited before recovery is permitted.
-///
-/// # Security Note
-///
-/// Recovery is an exceptional operation that should only be used for truly
-/// stranded funds. All recovery operations are logged via events and should
-/// be subject to governance review.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RecoveryReason {
-    /// Funds sent to contract address by mistake (no associated subscription).
-    /// This occurs when users accidentally send tokens directly to the contract.
-    AccidentalTransfer = 0,
-
-    /// Funds from deprecated contract flows or logic errors.
-    /// Used when contract upgrades or bugs leave funds in an inaccessible state.
-    DeprecatedFlow = 1,
-
-    /// Funds from cancelled subscriptions with unreachable addresses.
-    /// Subscribers may lose access to their withdrawal keys after cancellation.
-    UnreachableSubscriber = 2,
-}
-
-/// Event emitted when admin recovers stranded funds.
-///
-/// This event provides a complete audit trail for all recovery operations,
-/// including who initiated it, why, and how much was recovered.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct RecoveryEvent {
-    /// The admin who authorized the recovery
-    pub admin: Address,
-    /// The destination address receiving the recovered funds
-    pub recipient: Address,
-    /// The amount of funds recovered
-    pub amount: i128,
-    /// The documented reason for recovery
-    pub reason: RecoveryReason,
-    /// Timestamp when recovery was executed
-    pub timestamp: u64,
-}
-
-
-/// Stores subscription details and current state.
-///
-/// The `status` field is managed by the state machine. Use the provided
-/// transition helpers to modify status, never set it directly.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Subscription {
-    pub subscriber: Address,
-    pub merchant: Address,
-    pub amount: i128,
-    pub interval_seconds: u64,
-    pub last_payment_timestamp: u64,
-    /// Current lifecycle state. Modified only through state machine transitions.
-    pub status: SubscriptionStatus,
-    pub prepaid_balance: i128,
-    pub usage_enabled: bool,
-
-    /// Optional Unix timestamp (seconds) after which no more charges are allowed.
-    /// `None` means the subscription has no fixed end date and runs indefinitely.
-    pub expiration: Option<u64>,
-}
-
-/// Maximum subscription ID this contract will ever allocate.
-///
-/// The internal counter is a `u32`. When the counter reaches this value
-/// [`SubscriptionVault::create_subscription`] returns
-/// [`Error::SubscriptionLimitReached`] instead of wrapping or panicking.
-/// This equals `u32::MAX` (4 294 967 295), providing a practical lifetime
-/// limit that no real deployment will ever approach.
-pub const MAX_SUBSCRIPTION_ID: u32 = u32::MAX;
-
-/// Validates if a status transition is allowed by the state machine.
-///
-/// # State Transition Rules
-///
-/// | From              | To                  | Allowed |
-/// |-------------------|---------------------|---------|
-/// | Active            | Paused              | Yes     |
-/// | Active            | Cancelled           | Yes     |
-/// | Active            | InsufficientBalance | Yes     |
-/// | Paused            | Active              | Yes     |
-/// | Paused            | Cancelled           | Yes     |
-/// | InsufficientBalance | Active            | Yes     |
-/// | InsufficientBalance | Cancelled         | Yes     |
-/// | Cancelled         | *any*               | No      |
-/// | *any*             | Same status         | Yes (idempotent) |
-///
-/// # Arguments
-/// * `from` - Current status
-/// * `to` - Target status
-///
-/// # Returns
-/// * `Ok(())` if transition is valid
-/// * `Err(Error::InvalidStatusTransition)` if transition is invalid
-pub fn validate_status_transition(
-    from: &SubscriptionStatus,
-    to: &SubscriptionStatus,
-) -> Result<(), Error> {
-    // Same status is always allowed (idempotent)
-    if from == to {
-        return Ok(());
-    }
-
-    let valid = match from {
-        SubscriptionStatus::Active => matches!(
-            to,
-            SubscriptionStatus::Paused
-                | SubscriptionStatus::Cancelled
-                | SubscriptionStatus::InsufficientBalance
-        ),
-        SubscriptionStatus::Paused => {
-            matches!(
-                to,
-                SubscriptionStatus::Active | SubscriptionStatus::Cancelled
-            )
-        }
-        SubscriptionStatus::Cancelled => false,
-        SubscriptionStatus::InsufficientBalance => {
-            matches!(
-                to,
-                SubscriptionStatus::Active | SubscriptionStatus::Cancelled
-            )
-        }
-    };
-
-    if valid {
-        Ok(())
-    } else {
-        Err(Error::InvalidStatusTransition)
-    }
-}
-
-/// Returns all valid target statuses for a given current status.
-///
-/// This is useful for UI/documentation to show available actions.
-///
-/// # Examples
-///
-/// ```
-/// let targets = get_allowed_transitions(&SubscriptionStatus::Active);
-/// assert!(targets.contains(&SubscriptionStatus::Paused));
-/// ```
-pub fn get_allowed_transitions(status: &SubscriptionStatus) -> &'static [SubscriptionStatus] {
-    match status {
-        SubscriptionStatus::Active => &[
-            SubscriptionStatus::Paused,
-            SubscriptionStatus::Cancelled,
-            SubscriptionStatus::InsufficientBalance,
-        ],
-
-        SubscriptionStatus::Paused => &[
-            SubscriptionStatus::Active,
-            SubscriptionStatus::Cancelled,
-        ],
-        SubscriptionStatus::Cancelled => &[],
-        SubscriptionStatus::InsufficientBalance => &[
-            SubscriptionStatus::Active,
-            SubscriptionStatus::Cancelled,
-        ],
-
-        SubscriptionStatus::Paused => &[SubscriptionStatus::Active, SubscriptionStatus::Cancelled],
-        SubscriptionStatus::Cancelled => &[],
-        SubscriptionStatus::InsufficientBalance => {
-            &[SubscriptionStatus::Active, SubscriptionStatus::Cancelled]
-        }
-
-    }
-}
-
-/// Checks if a transition is valid without returning an error.
-///
-/// Convenience wrapper around [`validate_status_transition`] for boolean checks.
-pub fn can_transition(from: &SubscriptionStatus, to: &SubscriptionStatus) -> bool {
-    validate_status_transition(from, to).is_ok()
-}
-
-use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
-
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
-
+use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 pub use queries::compute_next_charge_info;
@@ -273,8 +31,6 @@ pub use types::{
     SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
     SubscriptionPausedEvent, SubscriptionResumedEvent, SubscriptionStatus, SubscriptionSummary,
 };
-
-use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
 
 /// Maximum subscription ID this contract will ever allocate.
 ///
@@ -308,16 +64,6 @@ fn require_not_emergency_stop(env: &Env) -> Result<(), Error> {
         return Err(Error::EmergencyStopActive);
     }
     Ok(())
-}
-
-fn _next_id(env: &Env) -> Result<u32, Error> {
-    let key = Symbol::new(env, "next_id");
-    let current: u32 = env.storage().instance().get(&key).unwrap_or(0u32);
-    if current == MAX_SUBSCRIPTION_ID {
-        return Err(Error::SubscriptionLimitReached);
-    }
-    env.storage().instance().set(&key, &(current + 1));
-    Ok(current)
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -411,9 +157,35 @@ impl SubscriptionVault {
         Ok(())
     }
 
-    /// **ADMIN ONLY**: Export contract-level configuration for migration tooling.
+    /// Disable the emergency stop (circuit breaker). Admin only.
     ///
-    /// Read-only snapshot intended for carefully managed upgrades.
+    /// When disabled, normal contract operations resume. This should only be used
+    /// after the incident has been resolved and the contract is safe to operate.
+    pub fn disable_emergency_stop(env: Env, admin: Address) -> Result<(), Error> {
+        require_admin_auth(&env, &admin)?;
+
+        if !get_emergency_stop(&env) {
+            return Ok(());
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyStop, &false);
+
+        env.events().publish(
+            (Symbol::new(&env, "emergency_stop_disabled"),),
+            EmergencyStopDisabledEvent {
+                admin,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    // ── Migration / Export ────────────────────────────────────────────────────
+
+    /// **ADMIN ONLY**: Export contract-level configuration for migration tooling.
     pub fn export_contract_snapshot(env: Env, admin: Address) -> Result<ContractSnapshot, Error> {
         require_admin_auth(&env, &admin)?;
 
@@ -445,63 +217,6 @@ impl SubscriptionVault {
     }
 
     /// Export a single subscription summary for migration tooling. Admin only.
-    pub fn export_subscription_summary(
-        env: Env,
-        admin: Address,
-        subscription_id: u32,
-    ) -> Result<SubscriptionSummary, Error> {
-        require_admin_auth(&env, &admin)?;
-        let sub = queries::get_subscription(&env, subscription_id)?;
-
-        env.events().publish(
-            (Symbol::new(&env, "migration_export"),),
-            MigrationExportEvent {
-                admin: admin.clone(),
-                start_id: subscription_id,
-                limit: 1,
-                exported: 1,
-                timestamp: env.ledger().timestamp(),
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Disable the emergency stop (circuit breaker). Admin only.
-    ///
-    /// When disabled, normal contract operations resume. This should only be used
-    /// after the incident has been resolved and the contract is safe to operate.
-    ///
-    /// # Requirements
-    /// - Caller must be the admin.
-    /// - Emergency stop must currently be enabled.
-    ///
-    /// # Emits
-    /// `EmergencyStopDisabledEvent` on success.
-    pub fn disable_emergency_stop(env: Env, admin: Address) -> Result<(), Error> {
-        require_admin_auth(&env, &admin)?;
-
-        if !get_emergency_stop(&env) {
-            // Already disabled - return success (idempotent)
-            return Ok(());
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::EmergencyStop, &false);
-
-        env.events().publish(
-            (Symbol::new(&env, "emergency_stop_disabled"),),
-            EmergencyStopDisabledEvent {
-                admin,
-                timestamp: env.ledger().timestamp(),
-            },
-        );
-
-        Ok(())
-    }
-
-    /// **ADMIN ONLY**: Export a single subscription summary for migration tooling.
     pub fn export_subscription_summary(
         env: Env,
         admin: Address,
@@ -565,11 +280,7 @@ impl SubscriptionVault {
         let mut exported = 0u32;
         let mut id = start_id;
         while id < end_id {
-            if let Some(sub) = env
-                .storage()
-                .instance()
-                .get::<u32, Subscription>(&id)
-            {
+            if let Some(sub) = env.storage().instance().get::<u32, Subscription>(&id) {
                 out.push_back(SubscriptionSummary {
                     subscription_id: id,
                     subscriber: sub.subscriber,
@@ -618,8 +329,6 @@ impl SubscriptionVault {
     /// # Errors
     /// Returns [`Error::SubscriptionLimitReached`] if the contract has already allocated
     /// [`MAX_SUBSCRIPTION_ID`] subscriptions and can issue no more unique IDs.
-
-    /// Create a new subscription. Caller deposits initial USDC; contract stores agreement.
     pub fn create_subscription(
         env: Env,
         subscriber: Address,
@@ -627,7 +336,7 @@ impl SubscriptionVault {
         amount: i128,
         interval_seconds: u64,
         usage_enabled: bool,
-        expiration: Option<u64>,
+        lifetime_cap: Option<i128>,
     ) -> Result<u32, Error> {
         require_not_emergency_stop(&env)?;
 
@@ -638,35 +347,24 @@ impl SubscriptionVault {
             amount,
             interval_seconds,
             usage_enabled,
-            expiration,
+            lifetime_cap,
         )
     }
 
-    /// Subscriber deposits more USDC into their vault for this subscription.
+    /// Subscriber deposits USDC into their prepaid vault.
     ///
-    /// # Minimum top-up enforcement
-    /// Rejects deposits below the configured minimum threshold to prevent inefficient
-    /// micro-transactions that waste gas and complicate accounting. The minimum is set
-    /// globally at contract initialization and adjustable by admin via `set_min_topup`.
-
-    /// Rejects deposits below the configured minimum threshold.
+    /// **Disabled when emergency stop is active.**
     pub fn deposit_funds(
         env: Env,
         subscription_id: u32,
         subscriber: Address,
         amount: i128,
     ) -> Result<(), Error> {
-        // Emergency stop check - block deposits when active
         require_not_emergency_stop(&env)?;
-
         subscription::do_deposit_funds(&env, subscription_id, subscriber, amount)
     }
 
     /// Creates a plan template that can be used to instantiate subscriptions.
-    ///
-    /// Plan templates allow merchants to define reusable subscription offerings
-    /// with predefined parameters. This ensures consistency and reduces the need
-    /// for repeated parameter input when creating similar subscriptions.
     ///
     /// # Arguments
     ///
@@ -702,30 +400,6 @@ impl SubscriptionVault {
     /// Retrieves a plan template by its ID.
     pub fn get_plan_template(env: Env, plan_template_id: u32) -> Result<PlanTemplate, Error> {
         subscription::get_plan_template(&env, plan_template_id)
-    }
-
-    /// Subscriber deposits USDC into their prepaid vault.
-    ///
-    /// **Disabled when emergency stop is active.**
-    pub fn deposit_funds(
-        env: Env,
-        subscription_id: u32,
-        subscriber: Address,
-        amount: i128,
-    ) -> Result<(), Error> {
-        require_not_emergency_stop(&env)?;
-
-
-        subscriber.require_auth();
-
-        let min_topup: i128 = env.storage().instance().get(&Symbol::new(&env, "min_topup")).ok_or(Error::NotFound)?;
-        if amount < min_topup {
-            return Err(Error::BelowMinimumTopup);
-        }
-
-        // TODO: transfer USDC from subscriber, increase prepaid_balance for subscription_id
-        let _ = (env, subscription_id, amount);
-        Ok(())
     }
 
     /// Cancel the subscription. Allowed from Active, Paused, or InsufficientBalance.
@@ -779,36 +453,17 @@ impl SubscriptionVault {
 
     /// Charge a subscription for one billing interval.
     ///
-    /// This function attempts to charge the subscriber's prepaid balance for the
-    /// recurring subscription fee. It enforces:
-    /// - The subscription must be in `Active` status
-    /// - The billing interval must have elapsed since the last charge
-    /// - The prepaid balance must be sufficient to cover the charge amount
-    ///
     /// **This function is disabled when the emergency stop is active.**
     ///
     /// Enforces strict interval timing and replay protection.
     pub fn charge_subscription(env: Env, subscription_id: u32) -> Result<(), Error> {
-        // Emergency stop check - block charges when active
         require_not_emergency_stop(&env)?;
-
         charge_core::charge_one(&env, subscription_id, env.ledger().timestamp(), None)
     }
 
     /// Charge a metered usage amount against the subscription's prepaid balance.
     ///
     /// **This function is disabled when the emergency stop is active.**
-    ///
-    /// Designed for integration with an **off-chain usage metering service**:
-    /// the service measures consumption, then calls this entrypoint with the
-    /// computed `usage_amount` to debit the subscriber's vault.
-    ///
-    /// # Requirements
-    ///
-    /// * The subscription must be `Active`.
-    /// * `usage_enabled` must be `true` on the subscription.
-    /// * `usage_amount` must be positive (`> 0`).
-    /// * `prepaid_balance` must be >= `usage_amount`.
     pub fn charge_usage(env: Env, subscription_id: u32, usage_amount: i128) -> Result<(), Error> {
         require_not_emergency_stop(&env)?;
         charge_core::charge_usage_one(&env, subscription_id, usage_amount)
@@ -826,7 +481,7 @@ impl SubscriptionVault {
         merchant::get_merchant_balance(&env, &merchant)
     }
 
-    // ── Queries ──────────────────────────────────────────────────────────
+    // ── Queries ──────────────────────────────────────────────────────────────
 
     /// Read subscription by id.
     pub fn get_subscription(env: Env, subscription_id: u32) -> Result<Subscription, Error> {
@@ -858,40 +513,10 @@ impl SubscriptionVault {
         queries::get_subscriptions_by_merchant(&env, merchant, start, limit)
     }
 
-    /// Return the total number of subscriptions ever created (i.e. the next ID that
-    /// would be allocated). This is a free storage read useful for off-chain indexers
-    /// and monitoring.
-    ///
-    /// Returns `0` before any subscription has been created.
+    /// Return the total number of subscriptions ever created.
     pub fn get_subscription_count(env: Env) -> u32 {
         let key = Symbol::new(&env, "next_id");
         env.storage().instance().get(&key).unwrap_or(0u32)
-    }
-
-    /// Allocate the next unique subscription ID.
-    ///
-    /// # Guarantees
-    /// - IDs start at `0` and increment by exactly `1` on each successful call.
-    /// - IDs are **never reused**: the counter only moves forward.
-    /// - IDs are **bounded**: when the counter reaches [`MAX_SUBSCRIPTION_ID`]
-    ///   this function returns [`Error::SubscriptionLimitReached`] instead of
-    ///   wrapping or panicking.
-    ///
-    /// # Errors
-    /// [`Error::SubscriptionLimitReached`] — counter is at [`MAX_SUBSCRIPTION_ID`].
-    fn _next_id(env: &Env) -> Result<u32, Error> {
-        let key = Symbol::new(env, "next_id");
-        let current: u32 = env.storage().instance().get(&key).unwrap_or(0u32);
-
-        // Guard: refuse to allocate when we are already at the ceiling.
-        // This makes the subsequent +1 infallible (current < u32::MAX).
-        if current == MAX_SUBSCRIPTION_ID {
-            return Err(Error::SubscriptionLimitReached);
-        }
-
-        // Safe: current < MAX_SUBSCRIPTION_ID == u32::MAX, so current + 1 cannot overflow.
-        env.storage().instance().set(&key, &(current + 1));
-        Ok(current)
     }
 
     /// Return the total number of subscriptions for a merchant.

@@ -43,7 +43,10 @@ pub struct InsufficientBalanceError {
 
 impl InsufficientBalanceError {
     pub const fn new(available: i128, required: i128) -> Self {
-        Self { available, required }
+        Self {
+            available,
+            required,
+        }
     }
 
     pub fn shortfall(&self) -> i128 {
@@ -97,13 +100,19 @@ pub enum Error {
     /// Combined balance would overflow i128.
     Overflow = 1012,
     /// The contract or requested configuration is not initialized.
-    NotInitialized = 1014,
+    NotInitialized = 1013,
     /// The requested export limit exceeds the maximum allowed.
     InvalidExportLimit = 1014,
     /// Invalid input provided to a function.
     InvalidInput = 1015,
     /// Reentrancy detected - function called recursively during execution.
     Reentrancy = 1016,
+    /// Lifetime charge cap has been reached; no further charges are allowed.
+    LifetimeCapReached = 1017,
+    /// Contract is already initialized; init may only be called once.
+    AlreadyInitialized = 1018,
+    /// The contract has allocated the maximum number of subscriptions.
+    SubscriptionLimitReached = 429,
 }
 
 impl Error {
@@ -118,7 +127,7 @@ impl Error {
             Error::InvalidStatusTransition => 400,
             Error::BelowMinimumTopup => 402,
             Error::Overflow => 1012,
-            Error::Underflow => 1013,
+            Error::Underflow => 1010,
             Error::InsufficientBalance => 1003,
             Error::InvalidAmount => 1006,
             Error::UsageNotEnabled => 1004,
@@ -131,6 +140,9 @@ impl Error {
             Error::NotInitialized => 1013,
             Error::InvalidExportLimit => 1014,
             Error::Reentrancy => 1016,
+            Error::LifetimeCapReached => 1017,
+            Error::AlreadyInitialized => 1018,
+            Error::SubscriptionLimitReached => 429,
         }
     }
 }

@@ -21,7 +21,6 @@
 //!
 //! See `docs/reentrancy.md` for full details on reentrancy threats and mitigations.
 
-
 use crate::queries::get_subscription;
 use crate::safe_math::{safe_add_balance, validate_non_negative};
 use crate::state_machine::validate_status_transition;

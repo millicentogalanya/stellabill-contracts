@@ -28,15 +28,12 @@
 //! Because there are no external calls, there is **no reentrancy risk** in this module.
 //! See `docs/reentrancy.md` for the full reentrancy threat model and mitigation strategy.
 
-
 #![allow(dead_code)]
 
 use crate::queries::get_subscription;
 use crate::safe_math::safe_sub_balance;
 use crate::state_machine::validate_status_transition;
-use crate::types::{
-    Error, LifetimeCapReachedEvent, SubscriptionChargedEvent, SubscriptionStatus,
-};
+use crate::types::{Error, LifetimeCapReachedEvent, SubscriptionChargedEvent, SubscriptionStatus};
 use soroban_sdk::{symbol_short, Env, Symbol};
 
 const KEY_CHARGED_PERIOD: Symbol = symbol_short!("cp");
@@ -127,10 +124,7 @@ pub fn charge_one(
     // The billing engine detects this via the LifetimeCapReachedEvent and by
     // checking the subscription status (Cancelled).
     if let Some(cap) = sub.lifetime_cap {
-        let remaining = cap
-            .checked_sub(sub.lifetime_charged)
-            .unwrap_or(0)
-            .max(0);
+        let remaining = cap.checked_sub(sub.lifetime_charged).unwrap_or(0).max(0);
 
         if remaining == 0 || sub.amount > remaining {
             // Cap already exhausted or this charge would exceed it — cancel.
