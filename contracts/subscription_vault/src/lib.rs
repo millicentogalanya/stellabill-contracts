@@ -515,6 +515,41 @@ impl SubscriptionVault {
         )
     }
 
+    /// Set a per-subscriber credit limit for a specific settlement token.
+    ///
+    /// The limit is expressed in token base units and applies across all of the
+    /// subscriber's subscriptions using that token. When the aggregate exposure
+    /// (prepaid balances plus expected interval liabilities) would exceed this
+    /// value, new subscriptions and top-ups are rejected.
+    pub fn set_subscriber_credit_limit(
+        env: Env,
+        admin: Address,
+        subscriber: Address,
+        token: Address,
+        limit: i128,
+    ) -> Result<(), Error> {
+        subscription::do_set_subscriber_credit_limit(&env, admin, subscriber, token, limit)
+    }
+
+    /// Read the configured credit limit for a subscriber and token.
+    ///
+    /// Returns 0 when no limit is configured, meaning "no limit".
+    pub fn get_subscriber_credit_limit(env: Env, subscriber: Address, token: Address) -> i128 {
+        subscription::get_subscriber_credit_limit(&env, subscriber, token)
+    }
+
+    /// Return the current aggregate exposure for a subscriber and token.
+    ///
+    /// Exposure is defined as the sum of prepaid balances plus the next-interval
+    /// amounts for active subscriptions.
+    pub fn get_subscriber_exposure(
+        env: Env,
+        subscriber: Address,
+        token: Address,
+    ) -> Result<i128, Error> {
+        subscription::get_subscriber_exposure(&env, subscriber, token)
+    }
+
     /// Cancel the subscription. Allowed from Active, Paused, or InsufficientBalance.
     /// Transitions to the terminal `Cancelled` state.
     pub fn cancel_subscription(

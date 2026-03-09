@@ -1699,6 +1699,105 @@ fn test_plan_max_concurrent_allows_new_after_cancellation() {
 }
 
 #[test]
+fn test_subscriber_credit_limit_blocks_new_subscription_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    // Limit total exposure for this subscriber/token to a single interval amount.
+    client.set_subscriber_credit_limit(&admin, &subscriber, &token, &AMOUNT);
+
+    // First subscription fits entirely within the limit.
+    let _sub1 =
+        client.create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+
+    // Second subscription would exceed credit limit (another interval liability).
+    let result =
+        client.try_create_subscription(&subscriber, &merchant, &AMOUNT, &INTERVAL, &false, &None);
+    assert_eq!(result, Err(Ok(Error::CreditLimitExceeded)));
+}
+
+#[test]
+fn test_subscriber_credit_limit_blocks_topup_when_exposure_exceeds_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    // Exposure limit small enough that initial subscription fits, but top-up does not.
+    let limit = AMOUNT + 5_000_000i128;
+    client.set_subscriber_credit_limit(&admin, &subscriber, &token, &limit);
+
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    // Deposit that would keep us under the limit succeeds.
+    client.deposit_funds(&sub_id, &subscriber, &5_000_000i128);
+
+    // Further deposit would push exposure over the limit and must be rejected.
+    let result = client.try_deposit_funds(&sub_id, &subscriber, &1_000_000i128);
+    assert_eq!(result, Err(Ok(Error::CreditLimitExceeded)));
+}
+
+#[test]
+fn test_get_subscriber_credit_limit_and_exposure_views() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    // Default: no limit configured.
+    assert_eq!(client.get_subscriber_credit_limit(&subscriber, &token), 0);
+
+    client.set_subscriber_credit_limit(&admin, &subscriber, &token, &(AMOUNT * 10));
+
+    // After creating a subscription, exposure reflects one interval liability and zero prepaid.
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    let exposure = client.get_subscriber_exposure(&subscriber, &token);
+    assert_eq!(exposure, AMOUNT);
+
+    // After topping up, exposure increases by the deposited amount.
+    client.deposit_funds(&sub_id, &subscriber, &5_000_000i128);
+    let exposure_after_topup = client.get_subscriber_exposure(&subscriber, &token);
+    assert_eq!(exposure_after_topup, AMOUNT + 5_000_000i128);
+}
+
+#[test]
 fn test_update_plan_template_creates_new_version_and_preserves_old() {
     let env = Env::default();
     env.mock_all_auths();

@@ -114,6 +114,84 @@ fn enforce_plan_concurrency_limit(
     Ok(())
 }
 
+fn credit_limit_key(
+    env: &Env,
+    subscriber: &Address,
+    token: &Address,
+) -> (Symbol, Address, Address) {
+    (
+        Symbol::new(env, "credit_limit"),
+        subscriber.clone(),
+        token.clone(),
+    )
+}
+
+fn get_subscriber_credit_limit_internal(env: &Env, subscriber: &Address, token: &Address) -> i128 {
+    env.storage()
+        .instance()
+        .get(&credit_limit_key(env, subscriber, token))
+        .unwrap_or(0)
+}
+
+fn compute_subscriber_exposure(
+    env: &Env,
+    subscriber: &Address,
+    token: &Address,
+) -> Result<i128, Error> {
+    let next_id_key = Symbol::new(env, "next_id");
+    let next_id: u32 = env.storage().instance().get(&next_id_key).unwrap_or(0);
+    let storage = env.storage().instance();
+
+    let mut exposure: i128 = 0;
+    for id in 0..next_id {
+        if let Some(sub) = storage.get::<u32, Subscription>(&id) {
+            if &sub.subscriber != subscriber || &sub.token != token {
+                continue;
+            }
+
+            // Base exposure: current prepaid balance.
+            exposure = exposure
+                .checked_add(sub.prepaid_balance)
+                .ok_or(Error::Overflow)?;
+
+            // For active subscriptions we also treat the next interval amount as expected liability.
+            if sub.status == SubscriptionStatus::Active {
+                exposure = exposure.checked_add(sub.amount).ok_or(Error::Overflow)?;
+            }
+        }
+    }
+
+    Ok(exposure)
+}
+
+fn enforce_credit_limit_for_delta(
+    env: &Env,
+    subscriber: &Address,
+    token: &Address,
+    additional_liability: i128,
+) -> Result<(), Error> {
+    // Zero or negative additions do not increase exposure.
+    if additional_liability <= 0 {
+        return Ok(());
+    }
+
+    let limit = get_subscriber_credit_limit_internal(env, subscriber, token);
+    // Zero means "no credit limit" configured.
+    if limit == 0 {
+        return Ok(());
+    }
+
+    let current = compute_subscriber_exposure(env, subscriber, token)?;
+    let new_exposure = current
+        .checked_add(additional_liability)
+        .ok_or(Error::Overflow)?;
+    if new_exposure > limit {
+        return Err(Error::CreditLimitExceeded);
+    }
+
+    Ok(())
+}
+
 pub fn do_create_subscription(
     env: &Env,
     subscriber: Address,
@@ -124,6 +202,10 @@ pub fn do_create_subscription(
     lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
     let token = crate::admin::get_token(env)?;
+
+    // Enforce subscriber-level credit limit for this token before creating a new
+    // subscription with additional interval liability `amount`.
+    enforce_credit_limit_for_delta(env, &subscriber, &token, amount)?;
     do_create_subscription_with_token(
         env,
         subscriber,
@@ -158,6 +240,9 @@ pub fn do_create_subscription_with_token(
             return Err(Error::InvalidAmount);
         }
     }
+
+    // Enforce credit limit for the token-specific subscription.
+    enforce_credit_limit_for_delta(env, &subscriber, &token, amount)?;
 
     let sub = Subscription {
         subscriber: subscriber.clone(),
@@ -236,6 +321,9 @@ pub fn do_deposit_funds(
 
     let mut sub = get_subscription(env, subscription_id)?;
     let token_addr = sub.token.clone();
+
+    // Enforce credit limit for additional prepaid balance being loaded.
+    enforce_credit_limit_for_delta(env, &subscriber, &token_addr, amount)?;
 
     // ──────────────────────────────────────────────────────────────────────────
     // EFFECTS: Update internal state before external interactions (CEI pattern)
@@ -481,6 +569,9 @@ pub fn do_create_subscription_from_plan(
 
     let plan = get_plan_template(env, plan_template_id)?;
 
+    // Enforce subscriber-level credit limit for the plan's token.
+    enforce_credit_limit_for_delta(env, &subscriber, &plan.token, plan.amount)?;
+
     // Enforce per-plan concurrency limit for this subscriber/plan pair.
     enforce_plan_concurrency_limit(env, &subscriber, plan_template_id)?;
 
@@ -689,4 +780,36 @@ pub fn do_set_plan_max_active_subs(
         .set(&plan_max_active_key(env, plan_template_id), &max_active);
 
     Ok(())
+}
+
+pub fn do_set_subscriber_credit_limit(
+    env: &Env,
+    admin: Address,
+    subscriber: Address,
+    token: Address,
+    limit: i128,
+) -> Result<(), Error> {
+    super::require_admin_auth(env, &admin)?;
+
+    if limit < 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    env.storage()
+        .instance()
+        .set(&credit_limit_key(env, &subscriber, &token), &limit);
+
+    Ok(())
+}
+
+pub fn get_subscriber_credit_limit(env: &Env, subscriber: Address, token: Address) -> i128 {
+    get_subscriber_credit_limit_internal(env, &subscriber, &token)
+}
+
+pub fn get_subscriber_exposure(
+    env: &Env,
+    subscriber: Address,
+    token: Address,
+) -> Result<i128, Error> {
+    compute_subscriber_exposure(env, &subscriber, &token)
 }

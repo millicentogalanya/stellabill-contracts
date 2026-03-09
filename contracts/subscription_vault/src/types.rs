@@ -124,6 +124,8 @@ pub enum Error {
     /// Subscriber has reached the maximum allowed number of active
     /// subscriptions for this plan.
     MaxConcurrentSubscriptionsReached = 1023,
+    /// Subscriber's configured credit limit would be exceeded.
+    CreditLimitExceeded = 1024,
 }
 
 impl Error {
@@ -159,6 +161,7 @@ impl Error {
             Error::OraclePriceInvalid => 1022,
             Error::SubscriptionLimitReached => 429,
             Error::MaxConcurrentSubscriptionsReached => 1023,
+            Error::CreditLimitExceeded => 1024,
         }
     }
 }
