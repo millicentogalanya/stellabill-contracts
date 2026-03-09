@@ -364,6 +364,46 @@ pub struct BillingStatementsPage {
     pub total: u32,
 }
 
+/// Retention policy for billing statements.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BillingRetentionConfig {
+    /// Number of most-recent detailed rows to keep per subscription.
+    pub keep_recent: u32,
+}
+
+/// Aggregated compacted history for pruned rows.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BillingStatementAggregate {
+    pub pruned_count: u32,
+    pub total_amount: i128,
+    pub oldest_period_start: Option<u64>,
+    pub newest_period_end: Option<u64>,
+}
+
+/// Result of a compaction run.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BillingCompactionSummary {
+    pub subscription_id: u32,
+    pub pruned_count: u32,
+    pub kept_count: u32,
+    pub total_pruned_amount: i128,
+}
+
+/// Event emitted when statement compaction executes.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BillingCompactedEvent {
+    pub admin: Address,
+    pub subscription_id: u32,
+    pub pruned_count: u32,
+    pub kept_count: u32,
+    pub total_pruned_amount: i128,
+    pub timestamp: u64,
+}
+
 /// Event emitted when emergency stop is enabled.
 #[contracttype]
 #[derive(Clone, Debug)]

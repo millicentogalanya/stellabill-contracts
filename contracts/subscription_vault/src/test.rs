@@ -2052,3 +2052,68 @@ fn test_billing_statements_cursor_pagination_boundaries() {
     assert_eq!(invalid_cursor.next_cursor, None);
     assert_eq!(invalid_cursor.total, 4);
 }
+
+#[test]
+fn test_compaction_prunes_old_statements_and_keeps_recent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let (client, token, admin) = setup_contract(&env);
+
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&subscriber, &2_000_000_000i128);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    client.deposit_funds(&id, &subscriber, &500_000_000i128);
+
+    for i in 1..=8 {
+        env.ledger().set_timestamp(T0 + (i as u64 * INTERVAL));
+        client.charge_subscription(&id);
+    }
+
+    client.set_billing_retention(&admin, &3);
+    let summary = client.compact_billing_statements(&admin, &id, &None::<u32>);
+    assert_eq!(summary.pruned_count, 5);
+    assert_eq!(summary.kept_count, 3);
+    assert_eq!(summary.total_pruned_amount, 5_000_000i128);
+
+    let page = client.get_sub_statements_offset(&id, &0, &10, &true);
+    assert_eq!(page.total, 3);
+    assert_eq!(page.statements.len(), 3);
+    assert_eq!(page.statements.get(0).unwrap().sequence, 7);
+    assert_eq!(page.statements.get(2).unwrap().sequence, 5);
+
+    let agg = client.get_stmt_compacted_aggregate(&id);
+    assert_eq!(agg.pruned_count, 5);
+    assert_eq!(agg.total_amount, 5_000_000i128);
+}
+
+#[test]
+fn test_compaction_no_rows_and_override_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _token, admin) = setup_contract(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    let summary = client.compact_billing_statements(&admin, &id, &Some(10u32));
+    assert_eq!(summary.pruned_count, 0);
+    assert_eq!(summary.kept_count, 0);
+    assert_eq!(summary.total_pruned_amount, 0);
+}

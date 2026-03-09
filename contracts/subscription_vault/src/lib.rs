@@ -25,12 +25,14 @@ use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
 pub use queries::compute_next_charge_info;
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
-    BatchChargeResult, BatchWithdrawResult, BillingChargeKind, BillingStatement, BillingStatementsPage,
-    CapInfo, ContractSnapshot, DataKey, EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error,
-    FundsDepositedEvent, LifetimeCapReachedEvent, MerchantWithdrawalEvent, MigrationExportEvent,
-    NextChargeInfo, OneOffChargedEvent, PlanTemplate, RecoveryEvent, RecoveryReason, Subscription,
-    SubscriptionCancelledEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent, SubscriptionPausedEvent,
-    SubscriptionResumedEvent, SubscriptionStatus, SubscriptionSummary,
+    BatchChargeResult, BatchWithdrawResult, BillingChargeKind, BillingCompactedEvent,
+    BillingCompactionSummary, BillingRetentionConfig, BillingStatement, BillingStatementAggregate,
+    BillingStatementsPage, CapInfo, ContractSnapshot, DataKey, EmergencyStopDisabledEvent,
+    EmergencyStopEnabledEvent, Error, FundsDepositedEvent, LifetimeCapReachedEvent,
+    MerchantWithdrawalEvent, MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, PlanTemplate,
+    RecoveryEvent, RecoveryReason, Subscription, SubscriptionCancelledEvent, SubscriptionChargedEvent,
+    SubscriptionCreatedEvent, SubscriptionPausedEvent, SubscriptionResumedEvent, SubscriptionStatus,
+    SubscriptionSummary,
 };
 
 /// Maximum subscription ID this contract will ever allocate.
@@ -582,6 +584,54 @@ impl SubscriptionVault {
             limit,
             newest_first,
         )
+    }
+
+    /// Configure statement retention (`keep_recent` detailed rows per subscription). Admin only.
+    pub fn set_billing_retention(
+        env: Env,
+        admin: Address,
+        keep_recent: u32,
+    ) -> Result<(), Error> {
+        require_admin_auth(&env, &admin)?;
+        statements::set_retention_config(&env, keep_recent);
+        Ok(())
+    }
+
+    /// Read current statement retention config.
+    pub fn get_billing_retention(env: Env) -> BillingRetentionConfig {
+        statements::get_retention_config(&env)
+    }
+
+    /// Return compacted aggregate totals for a subscription.
+    pub fn get_stmt_compacted_aggregate(
+        env: Env,
+        subscription_id: u32,
+    ) -> BillingStatementAggregate {
+        statements::get_compacted_aggregate(&env, subscription_id)
+    }
+
+    /// Run compaction for one subscription. Admin only.
+    pub fn compact_billing_statements(
+        env: Env,
+        admin: Address,
+        subscription_id: u32,
+        keep_recent_override: Option<u32>,
+    ) -> Result<BillingCompactionSummary, Error> {
+        require_admin_auth(&env, &admin)?;
+        let summary =
+            statements::compact_subscription_statements(&env, subscription_id, keep_recent_override);
+        env.events().publish(
+            (Symbol::new(&env, "billing_compacted"), subscription_id),
+            BillingCompactedEvent {
+                admin,
+                subscription_id,
+                pruned_count: summary.pruned_count,
+                kept_count: summary.kept_count,
+                total_pruned_amount: summary.total_pruned_amount,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Ok(summary)
     }
 }
 
