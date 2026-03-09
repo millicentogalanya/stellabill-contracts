@@ -16,7 +16,11 @@ use crate::safe_math::validate_non_negative;
 use crate::types::Error;
 use soroban_sdk::{token, Address, Env, Symbol};
 
-fn merchant_balance_key(env: &Env, merchant: &Address, token: &Address) -> (Symbol, Address, Address) {
+fn merchant_balance_key(
+    env: &Env,
+    merchant: &Address,
+    token: &Address,
+) -> (Symbol, Address, Address) {
     (
         Symbol::new(env, "merchant_balance"),
         merchant.clone(),

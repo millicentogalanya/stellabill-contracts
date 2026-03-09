@@ -20,14 +20,14 @@ pub fn set_oracle_config(
     }
     #[cfg(feature = "oracle-pricing")]
     {
-    if enabled && oracle.is_none() {
-        return Err(Error::OracleNotConfigured);
-    }
-    let storage = env.storage().instance();
-    storage.set(&Symbol::new(env, KEY_ORACLE_ENABLED), &enabled);
-    storage.set(&Symbol::new(env, KEY_ORACLE_ADDR), &oracle);
-    storage.set(&Symbol::new(env, KEY_ORACLE_MAX_AGE), &max_age_seconds);
-    Ok(())
+        if enabled && oracle.is_none() {
+            return Err(Error::OracleNotConfigured);
+        }
+        let storage = env.storage().instance();
+        storage.set(&Symbol::new(env, KEY_ORACLE_ENABLED), &enabled);
+        storage.set(&Symbol::new(env, KEY_ORACLE_ADDR), &oracle);
+        storage.set(&Symbol::new(env, KEY_ORACLE_MAX_AGE), &max_age_seconds);
+        Ok(())
     }
 }
 
@@ -43,16 +43,16 @@ pub fn get_oracle_config(env: &Env) -> OracleConfig {
     }
     #[cfg(feature = "oracle-pricing")]
     {
-    let storage = env.storage().instance();
-    OracleConfig {
-        enabled: storage
-            .get(&Symbol::new(env, KEY_ORACLE_ENABLED))
-            .unwrap_or(false),
-        oracle: storage.get(&Symbol::new(env, KEY_ORACLE_ADDR)),
-        max_age_seconds: storage
-            .get(&Symbol::new(env, KEY_ORACLE_MAX_AGE))
-            .unwrap_or(0u64),
-    }
+        let storage = env.storage().instance();
+        OracleConfig {
+            enabled: storage
+                .get(&Symbol::new(env, KEY_ORACLE_ENABLED))
+                .unwrap_or(false),
+            oracle: storage.get(&Symbol::new(env, KEY_ORACLE_ADDR)),
+            max_age_seconds: storage
+                .get(&Symbol::new(env, KEY_ORACLE_MAX_AGE))
+                .unwrap_or(0u64),
+        }
     }
 }
 
@@ -71,50 +71,46 @@ pub fn resolve_charge_amount(env: &Env, subscription: &Subscription) -> Result<i
     }
     #[cfg(feature = "oracle-pricing")]
     {
-    let cfg = get_oracle_config(env);
-    if !cfg.enabled {
-        return Ok(subscription.amount);
-    }
-
-    let oracle = cfg.oracle.ok_or(Error::OracleNotConfigured)?;
-    let price: OraclePrice = env.invoke_contract(
-        &oracle,
-        &Symbol::new(env, "latest_price"),
-        Vec::new(env),
-    );
-
-    if price.price <= 0 {
-        return Err(Error::OraclePriceInvalid);
-    }
-    if price.timestamp == 0 {
-        return Err(Error::OraclePriceUnavailable);
-    }
-    if cfg.max_age_seconds > 0 {
-        let now = env.ledger().timestamp();
-        if now.saturating_sub(price.timestamp) > cfg.max_age_seconds {
-            return Err(Error::OraclePriceStale);
+        let cfg = get_oracle_config(env);
+        if !cfg.enabled {
+            return Ok(subscription.amount);
         }
-    }
 
-    let token_decimals = crate::admin::get_token_decimals(env, &subscription.token).unwrap_or(6);
+        let oracle = cfg.oracle.ok_or(Error::OracleNotConfigured)?;
+        let price: OraclePrice =
+            env.invoke_contract(&oracle, &Symbol::new(env, "latest_price"), Vec::new(env));
 
-    let scale = 10i128
-        .checked_pow(token_decimals)
-        .ok_or(Error::Overflow)?;
-    let numerator = subscription
-        .amount
-        .checked_mul(scale)
-        .ok_or(Error::Overflow)?;
-    let ceil_adjust = price.price.checked_sub(1).ok_or(Error::Overflow)?;
-    let token_amount = numerator
-        .checked_add(ceil_adjust)
-        .ok_or(Error::Overflow)?
-        .checked_div(price.price)
-        .ok_or(Error::OraclePriceInvalid)?;
+        if price.price <= 0 {
+            return Err(Error::OraclePriceInvalid);
+        }
+        if price.timestamp == 0 {
+            return Err(Error::OraclePriceUnavailable);
+        }
+        if cfg.max_age_seconds > 0 {
+            let now = env.ledger().timestamp();
+            if now.saturating_sub(price.timestamp) > cfg.max_age_seconds {
+                return Err(Error::OraclePriceStale);
+            }
+        }
 
-    if token_amount <= 0 {
-        return Err(Error::OraclePriceInvalid);
-    }
-    Ok(token_amount)
+        let token_decimals =
+            crate::admin::get_token_decimals(env, &subscription.token).unwrap_or(6);
+
+        let scale = 10i128.checked_pow(token_decimals).ok_or(Error::Overflow)?;
+        let numerator = subscription
+            .amount
+            .checked_mul(scale)
+            .ok_or(Error::Overflow)?;
+        let ceil_adjust = price.price.checked_sub(1).ok_or(Error::Overflow)?;
+        let token_amount = numerator
+            .checked_add(ceil_adjust)
+            .ok_or(Error::Overflow)?
+            .checked_div(price.price)
+            .ok_or(Error::OraclePriceInvalid)?;
+
+        if token_amount <= 0 {
+            return Err(Error::OraclePriceInvalid);
+        }
+        Ok(token_amount)
     }
 }

@@ -26,14 +26,15 @@ use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
 pub use queries::compute_next_charge_info;
 pub use state_machine::{can_transition, get_allowed_transitions, validate_status_transition};
 pub use types::{
-    AcceptedToken, BatchChargeResult, BatchWithdrawResult, BillingChargeKind, BillingCompactedEvent,
-    BillingCompactionSummary, BillingRetentionConfig, BillingStatement, BillingStatementAggregate,
-    BillingStatementsPage, CapInfo, ContractSnapshot, DataKey, EmergencyStopDisabledEvent,
-    EmergencyStopEnabledEvent, Error, FundsDepositedEvent, LifetimeCapReachedEvent,
-    MerchantWithdrawalEvent, MigrationExportEvent, NextChargeInfo, OneOffChargedEvent, PlanTemplate,
-    OracleConfig, OraclePrice, RecoveryEvent, RecoveryReason, Subscription, SubscriptionCancelledEvent,
-    SubscriptionChargedEvent, SubscriptionCreatedEvent, SubscriptionPausedEvent,
-    SubscriptionResumedEvent, SubscriptionStatus, SubscriptionSummary,
+    AcceptedToken, BatchChargeResult, BatchWithdrawResult, BillingChargeKind,
+    BillingCompactedEvent, BillingCompactionSummary, BillingRetentionConfig, BillingStatement,
+    BillingStatementAggregate, BillingStatementsPage, CapInfo, ContractSnapshot, DataKey,
+    EmergencyStopDisabledEvent, EmergencyStopEnabledEvent, Error, FundsDepositedEvent,
+    LifetimeCapReachedEvent, MerchantWithdrawalEvent, MigrationExportEvent, NextChargeInfo,
+    OneOffChargedEvent, OracleConfig, OraclePrice, PlanTemplate, PlanTemplateUpdatedEvent,
+    RecoveryEvent, RecoveryReason, Subscription, SubscriptionCancelledEvent,
+    SubscriptionChargedEvent, SubscriptionCreatedEvent, SubscriptionMigratedEvent,
+    SubscriptionPausedEvent, SubscriptionResumedEvent, SubscriptionStatus, SubscriptionSummary,
 };
 
 /// Maximum subscription ID this contract will ever allocate.
@@ -453,6 +454,52 @@ impl SubscriptionVault {
         subscription::get_plan_template(&env, plan_template_id)
     }
 
+    /// Updates an existing plan template by creating a new version.
+    ///
+    /// This function never mutates the existing template in-place. Instead, it
+    /// creates a new `PlanTemplate` sharing the same `template_key` with a
+    /// monotonically increasing `version`. Existing subscriptions continue to
+    /// use their original template until explicitly migrated.
+    pub fn update_plan_template(
+        env: Env,
+        merchant: Address,
+        plan_template_id: u32,
+        amount: i128,
+        interval_seconds: u64,
+        usage_enabled: bool,
+        lifetime_cap: Option<i128>,
+    ) -> Result<u32, Error> {
+        subscription::do_update_plan_template(
+            &env,
+            merchant,
+            plan_template_id,
+            amount,
+            interval_seconds,
+            usage_enabled,
+            lifetime_cap,
+        )
+    }
+
+    /// Migrates an existing subscription to a newer version of the same plan template.
+    ///
+    /// The subscriber must authorize this call. Migration is only allowed between
+    /// plan versions that share the same `template_key`, and only from an older
+    /// version to a newer one. The settlement token cannot change as part of
+    /// migration, and lifetime caps are validated for compatibility.
+    pub fn migrate_subscription_to_plan(
+        env: Env,
+        subscriber: Address,
+        subscription_id: u32,
+        new_plan_template_id: u32,
+    ) -> Result<(), Error> {
+        subscription::do_migrate_subscription_to_plan(
+            &env,
+            subscriber,
+            subscription_id,
+            new_plan_template_id,
+        )
+    }
+
     /// Cancel the subscription. Allowed from Active, Paused, or InsufficientBalance.
     /// Transitions to the terminal `Cancelled` state.
     pub fn cancel_subscription(
@@ -699,11 +746,7 @@ impl SubscriptionVault {
     }
 
     /// Configure statement retention (`keep_recent` detailed rows per subscription). Admin only.
-    pub fn set_billing_retention(
-        env: Env,
-        admin: Address,
-        keep_recent: u32,
-    ) -> Result<(), Error> {
+    pub fn set_billing_retention(env: Env, admin: Address, keep_recent: u32) -> Result<(), Error> {
         require_admin_auth(&env, &admin)?;
         statements::set_retention_config(&env, keep_recent);
         Ok(())
@@ -730,8 +773,11 @@ impl SubscriptionVault {
         keep_recent_override: Option<u32>,
     ) -> Result<BillingCompactionSummary, Error> {
         require_admin_auth(&env, &admin)?;
-        let summary =
-            statements::compact_subscription_statements(&env, subscription_id, keep_recent_override);
+        let summary = statements::compact_subscription_statements(
+            &env,
+            subscription_id,
+            keep_recent_override,
+        );
         env.events().publish(
             (Symbol::new(&env, "billing_compacted"), subscription_id),
             BillingCompactedEvent {

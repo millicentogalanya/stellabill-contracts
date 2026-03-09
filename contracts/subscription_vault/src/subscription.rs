@@ -23,9 +23,12 @@
 
 use crate::queries::get_subscription;
 use crate::safe_math::{safe_add_balance, validate_non_negative};
-use crate::statements::append_statement;
 use crate::state_machine::validate_status_transition;
-use crate::types::{BillingChargeKind, DataKey, Error, PlanTemplate, Subscription, SubscriptionStatus};
+use crate::statements::append_statement;
+use crate::types::{
+    BillingChargeKind, DataKey, Error, PlanTemplate, PlanTemplateUpdatedEvent, Subscription,
+    SubscriptionMigratedEvent, SubscriptionStatus,
+};
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
 #[allow(dead_code)]
@@ -47,6 +50,10 @@ pub fn next_plan_id(env: &Env) -> u32 {
 pub fn get_plan_template(env: &Env, plan_template_id: u32) -> Result<PlanTemplate, Error> {
     let key = (Symbol::new(env, "plan"), plan_template_id);
     env.storage().instance().get(&key).ok_or(Error::NotFound)
+}
+
+fn sub_plan_key(env: &Env, subscription_id: u32) -> (Symbol, u32) {
+    (Symbol::new(env, "sub_plan"), subscription_id)
 }
 
 pub fn do_create_subscription(
@@ -130,7 +137,11 @@ pub fn do_create_subscription_with_token(
 
     // Maintain token -> subscription-ID index
     let token_key = (Symbol::new(env, "token_subs"), token);
-    let mut token_ids: Vec<u32> = env.storage().instance().get(&token_key).unwrap_or(Vec::new(env));
+    let mut token_ids: Vec<u32> = env
+        .storage()
+        .instance()
+        .get(&token_key)
+        .unwrap_or(Vec::new(env));
     token_ids.push_back(id);
     env.storage().instance().set(&token_key, &token_ids);
 
@@ -349,6 +360,7 @@ pub fn do_create_plan_template(
     }
 
     let token = crate::admin::get_token(env)?;
+    let plan_id = next_plan_id(env);
     let plan = PlanTemplate {
         merchant,
         token,
@@ -356,9 +368,10 @@ pub fn do_create_plan_template(
         interval_seconds,
         usage_enabled,
         lifetime_cap,
+        template_key: plan_id,
+        version: 1,
     };
 
-    let plan_id = next_plan_id(env);
     let key = (Symbol::new(env, "plan"), plan_id);
     env.storage().instance().set(&key, &plan);
 
@@ -384,6 +397,7 @@ pub fn do_create_plan_template_with_token(
         }
     }
 
+    let plan_id = next_plan_id(env);
     let plan = PlanTemplate {
         merchant,
         token,
@@ -391,9 +405,10 @@ pub fn do_create_plan_template_with_token(
         interval_seconds,
         usage_enabled,
         lifetime_cap,
+        template_key: plan_id,
+        version: 1,
     };
 
-    let plan_id = next_plan_id(env);
     let key = (Symbol::new(env, "plan"), plan_id);
     env.storage().instance().set(&key, &plan);
     Ok(plan_id)
@@ -428,6 +443,12 @@ pub fn do_create_subscription_from_plan(
 
     env.storage().instance().set(&id, &sub);
 
+    // Persist linkage between subscription and the plan template it was created from.
+    let sub_plan_storage_key = sub_plan_key(env, id);
+    env.storage()
+        .instance()
+        .set(&sub_plan_storage_key, &plan_template_id);
+
     // Maintain merchant → subscription-ID index
     let merchant_key = DataKey::MerchantSubs(plan.merchant.clone());
     let mut ids: Vec<u32> = env
@@ -440,9 +461,151 @@ pub fn do_create_subscription_from_plan(
 
     // Maintain token -> subscription-ID index
     let token_key = (Symbol::new(env, "token_subs"), plan.token);
-    let mut token_ids: Vec<u32> = env.storage().instance().get(&token_key).unwrap_or(Vec::new(env));
+    let mut token_ids: Vec<u32> = env
+        .storage()
+        .instance()
+        .get(&token_key)
+        .unwrap_or(Vec::new(env));
     token_ids.push_back(id);
     env.storage().instance().set(&token_key, &token_ids);
 
     Ok(id)
+}
+
+pub fn do_update_plan_template(
+    env: &Env,
+    merchant: Address,
+    plan_template_id: u32,
+    amount: i128,
+    interval_seconds: u64,
+    usage_enabled: bool,
+    lifetime_cap: Option<i128>,
+) -> Result<u32, Error> {
+    merchant.require_auth();
+
+    // Validate lifetime_cap if provided
+    if let Some(cap) = lifetime_cap {
+        if cap <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+    }
+
+    let existing = get_plan_template(env, plan_template_id)?;
+    if existing.merchant != merchant {
+        return Err(Error::Forbidden);
+    }
+
+    // Do not allow changing token through versioning – that would be a different plan family.
+    let token = existing.token.clone();
+
+    let new_plan_id = next_plan_id(env);
+    let new_version = existing.version + 1;
+    let updated = PlanTemplate {
+        merchant: merchant.clone(),
+        token,
+        amount,
+        interval_seconds,
+        usage_enabled,
+        lifetime_cap,
+        template_key: existing.template_key,
+        version: new_version,
+    };
+
+    let key = (Symbol::new(env, "plan"), new_plan_id);
+    env.storage().instance().set(&key, &updated);
+
+    env.events().publish(
+        (
+            Symbol::new(env, "plan_template_updated"),
+            existing.template_key,
+        ),
+        PlanTemplateUpdatedEvent {
+            template_key: existing.template_key,
+            old_plan_id: plan_template_id,
+            new_plan_id,
+            version: new_version,
+            merchant,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
+    Ok(new_plan_id)
+}
+
+pub fn do_migrate_subscription_to_plan(
+    env: &Env,
+    subscriber: Address,
+    subscription_id: u32,
+    new_plan_template_id: u32,
+) -> Result<(), Error> {
+    subscriber.require_auth();
+
+    let mut sub = get_subscription(env, subscription_id)?;
+    if sub.subscriber != subscriber {
+        return Err(Error::Forbidden);
+    }
+
+    // Resolve the current plan the subscription is pinned to (if any).
+    let sub_plan_storage_key = sub_plan_key(env, subscription_id);
+    let current_plan_id: u32 = match env.storage().instance().get(&sub_plan_storage_key) {
+        Some(id) => id,
+        None => {
+            // Subscription was not created from a plan template – explicit migration required.
+            return Err(Error::InvalidInput);
+        }
+    };
+
+    let current_plan = get_plan_template(env, current_plan_id)?;
+    let new_plan = get_plan_template(env, new_plan_template_id)?;
+
+    // Enforce migration within the same logical template family.
+    if current_plan.template_key != new_plan.template_key {
+        return Err(Error::InvalidInput);
+    }
+
+    // Only allow upgrades to newer versions.
+    if new_plan.version <= current_plan.version {
+        return Err(Error::InvalidInput);
+    }
+
+    // For safety, do not allow token switches via migration.
+    if new_plan.token != sub.token {
+        return Err(Error::InvalidInput);
+    }
+
+    // Enforce compatibility of lifetime caps: cannot migrate into a cap that is already exceeded.
+    if let Some(cap) = new_plan.lifetime_cap {
+        if sub.lifetime_charged > cap {
+            return Err(Error::LifetimeCapReached);
+        }
+        sub.lifetime_cap = Some(cap);
+    } else {
+        // Removing a cap via migration is allowed; keeps existing lifetime_charged.
+        sub.lifetime_cap = None;
+    }
+
+    // Apply updated commercial terms from the new plan version.
+    sub.amount = new_plan.amount;
+    sub.interval_seconds = new_plan.interval_seconds;
+    sub.usage_enabled = new_plan.usage_enabled;
+
+    env.storage().instance().set(&subscription_id, &sub);
+    env.storage()
+        .instance()
+        .set(&sub_plan_storage_key, &new_plan_template_id);
+
+    env.events().publish(
+        (Symbol::new(env, "subscription_migrated"), subscription_id),
+        SubscriptionMigratedEvent {
+            subscription_id,
+            template_key: new_plan.template_key,
+            from_plan_id: current_plan_id,
+            to_plan_id: new_plan_template_id,
+            merchant: new_plan.merchant,
+            subscriber,
+            timestamp: env.ledger().timestamp(),
+        },
+    );
+
+    Ok(())
 }

@@ -313,6 +313,13 @@ pub struct PlanTemplate {
     /// When `Some(cap)`, subscriptions created via this template will inherit the cap.
     /// `None` means subscriptions created from this template have no lifetime cap.
     pub lifetime_cap: Option<i128>,
+    /// Logical template group identifier.
+    ///
+    /// All versions of the same logical template share this value. The initial
+    /// version of a template uses its own plan ID as the template key.
+    pub template_key: u32,
+    /// Monotonic version number within the template group (starts at 1).
+    pub version: u32,
 }
 
 /// Result of computing next charge information for a subscription.
@@ -574,5 +581,43 @@ pub struct LifetimeCapReachedEvent {
     /// Total charged at the point the cap was reached.
     pub lifetime_charged: i128,
     /// Timestamp when the cap was reached.
+    pub timestamp: u64,
+}
+
+/// Event emitted when a plan template is updated to a new version.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PlanTemplateUpdatedEvent {
+    /// Logical template group identifier shared by all versions.
+    pub template_key: u32,
+    /// Previous plan template ID.
+    pub old_plan_id: u32,
+    /// Newly created plan template ID representing the updated version.
+    pub new_plan_id: u32,
+    /// Version number of the new plan template.
+    pub version: u32,
+    /// Merchant that owns this plan template.
+    pub merchant: Address,
+    /// Timestamp when the update occurred.
+    pub timestamp: u64,
+}
+
+/// Event emitted when a subscription is migrated from one plan template
+/// version to another.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionMigratedEvent {
+    pub subscription_id: u32,
+    /// Logical template group identifier shared by all versions.
+    pub template_key: u32,
+    /// Plan template ID the subscription was previously pinned to.
+    pub from_plan_id: u32,
+    /// Plan template ID the subscription is now pinned to.
+    pub to_plan_id: u32,
+    /// Merchant that owns the plan templates.
+    pub merchant: Address,
+    /// Subscriber that authorized the migration.
+    pub subscriber: Address,
+    /// Timestamp when the migration occurred.
     pub timestamp: u64,
 }
