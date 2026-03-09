@@ -65,8 +65,12 @@ pub fn append_statement(
     period_end: u64,
 ) {
     let storage = env.storage().instance();
-    let next: u32 = storage.get(&next_statement_key(subscription_id)).unwrap_or(0);
-    let live: u32 = storage.get(&live_statement_key(subscription_id)).unwrap_or(0);
+    let next: u32 = storage
+        .get(&next_statement_key(subscription_id))
+        .unwrap_or(0);
+    let live: u32 = storage
+        .get(&live_statement_key(subscription_id))
+        .unwrap_or(0);
     let statement = BillingStatement {
         subscription_id,
         sequence: next,
@@ -96,8 +100,12 @@ pub fn compact_subscription_statements(
 ) -> BillingCompactionSummary {
     let keep_recent = keep_recent_override.unwrap_or(get_retention_config(env).keep_recent);
     let storage = env.storage().instance();
-    let next: u32 = storage.get(&next_statement_key(subscription_id)).unwrap_or(0);
-    let live: u32 = storage.get(&live_statement_key(subscription_id)).unwrap_or(0);
+    let next: u32 = storage
+        .get(&next_statement_key(subscription_id))
+        .unwrap_or(0);
+    let live: u32 = storage
+        .get(&live_statement_key(subscription_id))
+        .unwrap_or(0);
 
     if live <= keep_recent || live == 0 {
         return BillingCompactionSummary {
@@ -181,7 +189,9 @@ pub fn get_statements_by_subscription_offset(
     }
 
     let storage = env.storage().instance();
-    let next: u32 = storage.get(&next_statement_key(subscription_id)).unwrap_or(0);
+    let next: u32 = storage
+        .get(&next_statement_key(subscription_id))
+        .unwrap_or(0);
     let mut out = Vec::new(env);
     let mut skipped = 0u32;
     let mut taken = 0u32;
@@ -191,7 +201,9 @@ pub fn get_statements_by_subscription_offset(
         let mut seq = next;
         while seq > 0 {
             seq -= 1;
-            if let Some(row) = storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq)) {
+            if let Some(row) =
+                storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq))
+            {
                 if skipped < offset {
                     skipped += 1;
                     continue;
@@ -207,7 +219,9 @@ pub fn get_statements_by_subscription_offset(
     } else {
         let mut seq = 0u32;
         while seq < next {
-            if let Some(row) = storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq)) {
+            if let Some(row) =
+                storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq))
+            {
                 if skipped < offset {
                     skipped += 1;
                     seq += 1;
@@ -253,7 +267,9 @@ pub fn get_statements_by_subscription_cursor(
     }
 
     let storage = env.storage().instance();
-    let next: u32 = storage.get(&next_statement_key(subscription_id)).unwrap_or(0);
+    let next: u32 = storage
+        .get(&next_statement_key(subscription_id))
+        .unwrap_or(0);
     if next == 0 {
         return Ok(BillingStatementsPage {
             statements: Vec::new(env),
@@ -278,7 +294,9 @@ pub fn get_statements_by_subscription_cursor(
     if newest_first {
         let mut seq = start;
         loop {
-            if let Some(row) = storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq)) {
+            if let Some(row) =
+                storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq))
+            {
                 out.push_back(row);
                 taken += 1;
                 if taken >= limit {
@@ -294,7 +312,9 @@ pub fn get_statements_by_subscription_cursor(
     } else {
         let mut seq = start;
         while seq <= max_seq {
-            if let Some(row) = storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq)) {
+            if let Some(row) =
+                storage.get::<_, BillingStatement>(&statement_row_key(subscription_id, seq))
+            {
                 out.push_back(row);
                 taken += 1;
                 if taken >= limit {

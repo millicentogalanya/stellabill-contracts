@@ -104,9 +104,10 @@ struct MockOracle;
 #[contractimpl]
 impl MockOracle {
     pub fn set_price(env: Env, price: i128, timestamp: u64) {
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "price"), &OraclePrice { price, timestamp });
+        env.storage().instance().set(
+            &Symbol::new(&env, "price"),
+            &OraclePrice { price, timestamp },
+        );
     }
 
     pub fn latest_price(env: Env) -> OraclePrice {
@@ -1609,6 +1610,8 @@ fn test_plan_template_inherits_lifetime_cap() {
 
     let template = client.get_plan_template(&plan_id);
     assert_eq!(template.lifetime_cap, Some(cap));
+    assert_eq!(template.version, 1);
+    assert_eq!(template.template_key, plan_id);
 
     let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
     let sub = client.get_subscription(&sub_id);
@@ -1635,6 +1638,182 @@ fn test_plan_template_no_cap_creates_uncapped_sub() {
     let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
     let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.lifetime_cap, None);
+}
+
+#[test]
+fn test_update_plan_template_creates_new_version_and_preserves_old() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let cap = 50_000_000i128;
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &Some(cap));
+    let original = client.get_plan_template(&plan_id);
+    assert_eq!(original.version, 1);
+
+    let new_amount = AMOUNT * 2;
+    let new_interval = INTERVAL / 2;
+    let new_plan_id = client.update_plan_template(
+        &merchant,
+        &plan_id,
+        &new_amount,
+        &new_interval,
+        &true,
+        &Some(cap),
+    );
+
+    // Old plan remains unchanged and addressable.
+    let original_after = client.get_plan_template(&plan_id);
+    assert_eq!(original_after.version, 1);
+    assert_eq!(original_after.amount, AMOUNT);
+    assert_eq!(original_after.interval_seconds, INTERVAL);
+    assert!(!original_after.usage_enabled);
+
+    // New plan has incremented version and updated fields, sharing template_key.
+    let updated = client.get_plan_template(&new_plan_id);
+    assert_eq!(updated.version, 2);
+    assert_eq!(updated.template_key, original_after.template_key);
+    assert_eq!(updated.amount, new_amount);
+    assert_eq!(updated.interval_seconds, new_interval);
+    assert!(updated.usage_enabled);
+    assert_eq!(updated.lifetime_cap, Some(cap));
+}
+
+#[test]
+fn test_migrate_subscription_to_new_plan_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let cap = 50_000_000i128;
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &Some(cap));
+    let new_amount = AMOUNT * 3;
+    let new_interval = INTERVAL / 3;
+    let new_plan_id = client.update_plan_template(
+        &merchant,
+        &plan_id,
+        &new_amount,
+        &new_interval,
+        &true,
+        &Some(cap),
+    );
+
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_id);
+    let before = client.get_subscription(&sub_id);
+    assert_eq!(before.amount, AMOUNT);
+    assert_eq!(before.interval_seconds, INTERVAL);
+    assert!(!before.usage_enabled);
+
+    client.migrate_subscription_to_plan(&subscriber, &sub_id, &new_plan_id);
+
+    let after = client.get_subscription(&sub_id);
+    assert_eq!(after.amount, new_amount);
+    assert_eq!(after.interval_seconds, new_interval);
+    assert!(after.usage_enabled);
+    // Lifetime tracking is preserved.
+    assert_eq!(after.lifetime_charged, 0);
+    assert_eq!(after.lifetime_cap, Some(cap));
+}
+
+#[test]
+fn test_migrate_subscription_rejects_cross_template_family() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+
+    let plan_family_a =
+        client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    let plan_family_b =
+        client.create_plan_template(&merchant, &(AMOUNT * 2), &INTERVAL, &false, &None::<i128>);
+
+    let sub_id = client.create_subscription_from_plan(&subscriber, &plan_family_a);
+
+    let result = client.try_migrate_subscription_to_plan(&subscriber, &sub_id, &plan_family_b);
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_migrate_subscription_requires_plan_origin() {
+    let (env, client, _, _) = setup_test_env();
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    // Create a subscription directly (not from a plan template).
+    let sub_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &AMOUNT,
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+
+    // Create a plan template to migrate to.
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+
+    let result = client.try_migrate_subscription_to_plan(&subscriber, &sub_id, &plan_id);
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+}
+
+#[test]
+fn test_update_plan_template_cannot_change_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+
+    let subscriber = Address::generate(&env);
+    let token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let other_token = create_token_and_mint(&env, &subscriber, 1_000_000_000i128);
+    let admin = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.init(&token, &6, &admin, &1_000_000i128, &0u64);
+    client.add_accepted_token(&admin, &other_token, &6);
+
+    let plan_id = client.create_plan_template(&merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    let original = client.get_plan_template(&plan_id);
+
+    // Even if we conceptually want to move to a different token, versioning API
+    // does not allow this; such a change should use a separate template family.
+    let _ = original; // silence unused, documentation-only test narrative.
+
+    // We indirectly assert this by verifying that update_plan_template always
+    // keeps the existing token.
+    let new_plan_id = client.update_plan_template(
+        &merchant,
+        &plan_id,
+        &(AMOUNT * 2),
+        &INTERVAL,
+        &false,
+        &None::<i128>,
+    );
+    let updated = client.get_plan_template(&new_plan_id);
+    assert_eq!(updated.token, token);
 }
 
 /// Subscriber can withdraw remaining prepaid balance after cap-triggered cancellation.
@@ -2158,7 +2337,12 @@ fn test_oracle_enabled_charge_uses_quote_conversion() {
     oracle.set_price(&2_000_000i128, &T0); // 2 quote units/token with 6 decimals
 
     // Enable oracle pricing with non-stale quote.
-    client.set_oracle_config(&admin, &true, &Some(oracle_id.clone()), &(60 * 24 * 60 * 60));
+    client.set_oracle_config(
+        &admin,
+        &true,
+        &Some(oracle_id.clone()),
+        &(60 * 24 * 60 * 60),
+    );
 
     let subscriber = Address::generate(&env);
     let merchant = Address::generate(&env);
@@ -2231,8 +2415,10 @@ fn test_multi_token_balances_are_isolated_per_token() {
     let merchant = Address::generate(&env);
     let subscriber_a = Address::generate(&env);
     let subscriber_b = Address::generate(&env);
-    soroban_sdk::token::StellarAssetClient::new(&env, &token_a).mint(&subscriber_a, &100_000_000i128);
-    soroban_sdk::token::StellarAssetClient::new(&env, &token_b).mint(&subscriber_b, &100_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_a)
+        .mint(&subscriber_a, &100_000_000i128);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_b)
+        .mint(&subscriber_b, &100_000_000i128);
 
     let id_a = client.create_subscription(
         &subscriber_a,
@@ -2258,8 +2444,14 @@ fn test_multi_token_balances_are_isolated_per_token() {
     client.charge_subscription(&id_a);
     client.charge_subscription(&id_b);
 
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 5_000_000i128);
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 7_000_000i128);
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        5_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        7_000_000i128
+    );
 }
 
 #[test]

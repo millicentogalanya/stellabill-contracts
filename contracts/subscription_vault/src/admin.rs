@@ -130,7 +130,9 @@ pub fn add_accepted_token(
 
     let storage = env.storage().instance();
     if !storage.has(&accepted_token_decimals_key(env, &token)) {
-        let mut tokens: Vec<Address> = storage.get(&accepted_tokens_key(env)).unwrap_or(Vec::new(env));
+        let mut tokens: Vec<Address> = storage
+            .get(&accepted_tokens_key(env))
+            .unwrap_or(Vec::new(env));
         tokens.push_back(token.clone());
         storage.set(&accepted_tokens_key(env), &tokens);
     }
@@ -153,7 +155,9 @@ pub fn remove_accepted_token(env: &Env, admin: Address, token: Address) -> Resul
     let storage = env.storage().instance();
     storage.remove(&accepted_token_decimals_key(env, &token));
 
-    let tokens: Vec<Address> = storage.get(&accepted_tokens_key(env)).unwrap_or(Vec::new(env));
+    let tokens: Vec<Address> = storage
+        .get(&accepted_tokens_key(env))
+        .unwrap_or(Vec::new(env));
     let mut next = Vec::new(env);
     for t in tokens.iter() {
         if t != token {
@@ -166,7 +170,9 @@ pub fn remove_accepted_token(env: &Env, admin: Address, token: Address) -> Resul
 
 pub fn list_accepted_tokens(env: &Env) -> Vec<AcceptedToken> {
     let storage = env.storage().instance();
-    let tokens: Vec<Address> = storage.get(&accepted_tokens_key(env)).unwrap_or(Vec::new(env));
+    let tokens: Vec<Address> = storage
+        .get(&accepted_tokens_key(env))
+        .unwrap_or(Vec::new(env));
     let mut out = Vec::new(env);
     for token in tokens.iter() {
         if let Some(decimals) = storage.get::<_, u32>(&accepted_token_decimals_key(env, &token)) {

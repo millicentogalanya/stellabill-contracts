@@ -32,8 +32,8 @@
 
 use crate::queries::get_subscription;
 use crate::safe_math::safe_sub_balance;
-use crate::statements::append_statement;
 use crate::state_machine::validate_status_transition;
+use crate::statements::append_statement;
 use crate::types::{
     BillingChargeKind, Error, LifetimeCapReachedEvent, SubscriptionChargedEvent, SubscriptionStatus,
 };
