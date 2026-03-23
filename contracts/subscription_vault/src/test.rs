@@ -2441,7 +2441,7 @@ fn test_merchant_token_bucket_reconciliation() {
         &false,
         &None::<i128>,
     );
-    
+
     let id_b = client.create_subscription_with_token(
         &subscriber_b,
         &merchant,
@@ -2464,15 +2464,27 @@ fn test_merchant_token_bucket_reconciliation() {
     client.charge_subscription(&id_a);
     client.charge_subscription(&id_b);
 
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 5_000_000i128);
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 7_000_000i128);
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        5_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        7_000_000i128
+    );
     assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
 
     // Partial withdraw Token A (test withdrawal invariant and isolation)
     client.withdraw_merchant_token_funds(&merchant, &token_a, &2_000_000i128);
 
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 3_000_000i128);
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 7_000_000i128);
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        3_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        7_000_000i128
+    );
     assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
 
     assert_eq!(token_a_client.balance(&merchant), 2_000_000i128);
@@ -2483,13 +2495,22 @@ fn test_merchant_token_bucket_reconciliation() {
     client.charge_subscription(&id_a);
     client.charge_subscription(&id_b);
 
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 8_000_000i128);
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 14_000_000i128);
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        8_000_000i128
+    );
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_b),
+        14_000_000i128
+    );
 
     // Full withdraw Token B
     client.withdraw_merchant_token_funds(&merchant, &token_b, &14_000_000i128);
 
-    assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_a), 8_000_000i128);
+    assert_eq!(
+        client.get_merchant_balance_by_token(&merchant, &token_a),
+        8_000_000i128
+    );
     assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_b), 0);
     assert_eq!(client.get_merchant_balance_by_token(&merchant, &token_c), 0);
 
