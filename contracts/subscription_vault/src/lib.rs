@@ -16,6 +16,7 @@ mod blocklist;
 mod charge_core;
 mod merchant;
 mod metadata;
+pub mod migration;
 mod oracle;
 mod queries;
 mod reentrancy;
