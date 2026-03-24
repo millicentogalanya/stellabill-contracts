@@ -1,5 +1,5 @@
+use crate::types::{DataKey, Error, MigrationExportEvent, Subscription, SubscriptionSummary};
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
-use crate::types::{DataKey, Error, Subscription, SubscriptionSummary, MigrationExportEvent};
 
 const MAX_EXPORT_LIMIT: u32 = 100;
 
@@ -15,10 +15,13 @@ impl MigrationContract {
         start_id: u32,
         limit: u32,
     ) -> Result<(Vec<SubscriptionSummary>, u32), Error> {
-        
         // 1. Strict Access Control
         // If Admin is not set, it fails gracefully instead of panicking
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::NotInitialized)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
         admin.require_auth();
 
         // 2. Limit Boundary Validation (Uses their Error::InvalidExportLimit)
@@ -29,7 +32,7 @@ impl MigrationContract {
         let mut results = Vec::new(&env);
         let mut current_id = start_id;
         let mut collected_count = 0;
-        
+
         // Fetch the global maximum ID to prevent infinite loops
         let max_id: u32 = env.storage().instance().get(&DataKey::NextId).unwrap_or(0);
 
@@ -37,7 +40,7 @@ impl MigrationContract {
         while collected_count < limit && current_id < max_id {
             // Using their `Sub` DataKey
             let key = DataKey::Sub(current_id);
-            
+
             // If the subscription exists, map it to the Migration Summary struct
             if let Some(sub) = env.storage().persistent().get::<_, Subscription>(&key) {
                 let summary = SubscriptionSummary {
@@ -57,7 +60,7 @@ impl MigrationContract {
                 results.push_back(summary);
                 collected_count += 1;
             }
-            
+
             current_id += 1;
         }
 
@@ -69,11 +72,9 @@ impl MigrationContract {
             exported: collected_count,
             timestamp: env.ledger().timestamp(),
         };
-        
-        env.events().publish(
-            (symbol_short!("export"), start_id),
-            event_payload,
-        );
+
+        env.events()
+            .publish((symbol_short!("export"), start_id), event_payload);
 
         // Return the batch and the cursor for the next page
         Ok((results, current_id))
@@ -83,8 +84,8 @@ impl MigrationContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _}, Env};
-    use crate::types::{SubscriptionStatus, Subscription};
+    use crate::types::{Subscription, SubscriptionStatus};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     // Helper to generate a dummy subscription for testing
     fn create_mock_subscription(env: &Env) -> Subscription {
@@ -110,7 +111,7 @@ mod test {
         let contract_id = env.register_contract(None, MigrationContract);
         let client = MigrationContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        
+
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             env.storage().instance().set(&DataKey::Admin, &admin);
@@ -126,7 +127,7 @@ mod test {
         let contract_id = env.register_contract(None, MigrationContract);
         let client = MigrationContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        
+
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             env.storage().instance().set(&DataKey::Admin, &admin);
@@ -142,7 +143,7 @@ mod test {
         let contract_id = env.register_contract(None, MigrationContract);
         let client = MigrationContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env); // Actual admin
-        
+
         // We purposefully do NOT mock auth here to simulate an unauthorized call
         env.as_contract(&contract_id, || {
             env.storage().instance().set(&DataKey::Admin, &admin);
@@ -157,7 +158,7 @@ mod test {
         let contract_id = env.register_contract(None, MigrationContract);
         let client = MigrationContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        
+
         env.mock_all_auths();
 
         // Setup the mocked database state
@@ -166,20 +167,37 @@ mod test {
             env.storage().instance().set(&DataKey::NextId, &6u32);
 
             // Insert at IDs 1, 3, and 5 (leaving 0, 2, 4 completely empty/sparse)
-            env.storage().persistent().set(&DataKey::Sub(1), &create_mock_subscription(&env));
-            env.storage().persistent().set(&DataKey::Sub(3), &create_mock_subscription(&env));
-            env.storage().persistent().set(&DataKey::Sub(5), &create_mock_subscription(&env));
+            env.storage()
+                .persistent()
+                .set(&DataKey::Sub(1), &create_mock_subscription(&env));
+            env.storage()
+                .persistent()
+                .set(&DataKey::Sub(3), &create_mock_subscription(&env));
+            env.storage()
+                .persistent()
+                .set(&DataKey::Sub(5), &create_mock_subscription(&env));
         });
 
         // Request a limit of 2, starting from ID 0
         let (results, next_cursor) = client.export_snapshots(&0, &2);
-        
+
         // Assertions
         assert_eq!(results.len(), 2, "Should have collected exactly 2 records");
-        assert_eq!(results.get(0).unwrap().subscription_id, 1, "First record should be ID 1");
-        assert_eq!(results.get(1).unwrap().subscription_id, 3, "Second record should be ID 3");
-        
+        assert_eq!(
+            results.get(0).unwrap().subscription_id,
+            1,
+            "First record should be ID 1"
+        );
+        assert_eq!(
+            results.get(1).unwrap().subscription_id,
+            3,
+            "Second record should be ID 3"
+        );
+
         // The loop should have checked 0, 1, 2, 3 and stopped, meaning the next ID to check is 4
-        assert_eq!(next_cursor, 4, "Cursor should point to the next ID to evaluate");
+        assert_eq!(
+            next_cursor, 4,
+            "Cursor should point to the next ID to evaluate"
+        );
     }
 }

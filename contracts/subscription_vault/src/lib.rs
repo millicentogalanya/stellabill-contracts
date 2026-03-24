@@ -16,6 +16,7 @@ mod blocklist;
 mod charge_core;
 mod merchant;
 mod metadata;
+pub mod migration;
 mod oracle;
 mod queries;
 mod reentrancy;
@@ -24,7 +25,6 @@ mod state_machine;
 mod statements;
 mod subscription;
 mod types;
-pub mod migration;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
