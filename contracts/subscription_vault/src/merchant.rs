@@ -12,6 +12,7 @@
 //!
 //! See `docs/reentrancy.md` for details on the reentrancy threat model and mitigation.
 
+use crate::types::MerchantConfig;
 use crate::safe_math::validate_non_negative;
 use crate::types::{
     AccruedTotals, BillingChargeKind, DataKey, Error, ReconciliationSnapshot, TokenEarnings,
