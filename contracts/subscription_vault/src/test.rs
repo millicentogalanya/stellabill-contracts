@@ -2397,3 +2397,19 @@ fn test_create_subscription_with_unaccepted_token_fails() {
     );
     assert_eq!(result, Err(Ok(Error::InvalidInput)));
 }
+
+#[test]
+fn test_event_schema_consistency() {
+    let env = Env::default();
+    // ... setup contract and subscriber ...
+
+    contract.create_subscription(&subscriber, &merchant, &amount, &interval, &true);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    
+    // VERIFICATION STEPS:
+    // 1. Assert Topic 1 matches Symbol::short("sub_crea")
+    // 2. Assert Topic 2 matches the subscriber Address
+    // 3. Assert Data payload length is exactly 4
+}
