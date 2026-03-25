@@ -12,6 +12,7 @@
 //!
 //! See `docs/reentrancy.md` for details on the reentrancy threat model and mitigation.
 
+use crate::types::MerchantConfig;
 use crate::safe_math::validate_non_negative;
 use crate::types::{DataKey, Error, MerchantPausedEvent, MerchantUnpausedEvent};
 use soroban_sdk::{token, Address, Env, Symbol};
@@ -120,52 +121,28 @@ pub fn withdraw_merchant_funds_for_token(
     Ok(())
 }
 
-pub fn get_merchant_paused(env: &Env, merchant: Address) -> bool {
-    let key = DataKey::MerchantPaused(merchant);
-    env.storage().instance().get(&key).unwrap_or(false)
+fn merchant_config_key(env: &Env, merchant: &Address) -> (Symbol, Address) {
+    (Symbol::new(env, "merch_conf"), merchant.clone())
 }
 
-pub fn set_merchant_paused(env: &Env, merchant: Address, paused: bool) {
-    let key = DataKey::MerchantPaused(merchant);
-    env.storage().instance().set(&key, &paused);
-}
-
-pub fn pause_merchant(env: &Env, merchant: Address) -> Result<(), Error> {
+pub fn set_merchant_config(
+    env: &Env,
+    merchant: Address,
+    config: MerchantConfig,
+) -> Result<(), Error> {
     merchant.require_auth();
-
-    if get_merchant_paused(env, merchant.clone()) {
-        return Ok(());
+    
+    // Validation: URL shouldn't be excessively long (standard limit 256)
+    if config.redirect_url.len() > 256 {
+        return Err(Error::InvalidAmount); // Reusing error or add specific one
     }
 
-    set_merchant_paused(env, merchant.clone(), true);
-
-    env.events().publish(
-        (Symbol::new(env, "merchant_paused"), merchant.clone()),
-        MerchantPausedEvent {
-            merchant,
-            timestamp: env.ledger().timestamp(),
-        },
-    );
-
+    let key = merchant_config_key(env, &merchant);
+    env.storage().instance().set(&key, &config);
     Ok(())
 }
 
-pub fn unpause_merchant(env: &Env, merchant: Address) -> Result<(), Error> {
-    merchant.require_auth();
-
-    if !get_merchant_paused(env, merchant.clone()) {
-        return Ok(());
-    }
-
-    set_merchant_paused(env, merchant.clone(), false);
-
-    env.events().publish(
-        (Symbol::new(env, "merchant_unpaused"), merchant.clone()),
-        MerchantUnpausedEvent {
-            merchant,
-            timestamp: env.ledger().timestamp(),
-        },
-    );
-
-    Ok(())
+pub fn get_merchant_config(env: &Env, merchant: Address) -> Option<MerchantConfig> {
+    let key = merchant_config_key(env, &merchant);
+    env.storage().instance().get(&key)
 }
