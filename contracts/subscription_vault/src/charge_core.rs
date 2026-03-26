@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use crate::queries::get_subscription;
-use crate::safe_math::safe_sub_balance;
+use crate::safe_math::{safe_add, safe_sub, safe_sub_balance};
 use crate::state_machine::validate_status_transition;
 use crate::statements::append_statement;
 use crate::types::{
@@ -82,7 +82,7 @@ pub fn charge_one(
 
     // -- Lifetime cap pre-check -----------------------------------------------
     if let Some(cap) = sub.lifetime_cap {
-        let remaining = cap.checked_sub(sub.lifetime_charged).unwrap_or(0).max(0);
+        let remaining = safe_sub(cap, sub.lifetime_charged).unwrap_or(0).max(0);
 
         if remaining == 0 || charge_amount > remaining {
             // Cap already exhausted or this charge would exceed it — cancel.
@@ -117,10 +117,7 @@ pub fn charge_one(
             )?;
             sub.last_payment_timestamp = now;
 
-            sub.lifetime_charged = sub
-                .lifetime_charged
-                .checked_add(charge_amount)
-                .ok_or(Error::Overflow)?;
+            sub.lifetime_charged = safe_add(sub.lifetime_charged, charge_amount)?;
 
             // Recover from grace period on successful charge
             if sub.status == SubscriptionStatus::GracePeriod {
@@ -219,10 +216,7 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
 
     // -- Lifetime cap pre-check -----------------------------------------------
     if let Some(cap) = sub.lifetime_cap {
-        let new_charged = sub
-            .lifetime_charged
-            .checked_add(usage_amount)
-            .ok_or(Error::Overflow)?;
+        let new_charged = safe_add(sub.lifetime_charged, usage_amount)?;
         if new_charged > cap {
             validate_status_transition(&sub.status, &SubscriptionStatus::Cancelled)?;
             sub.status = SubscriptionStatus::Cancelled;
@@ -244,10 +238,7 @@ pub fn charge_usage_one(env: &Env, subscription_id: u32, usage_amount: i128) -> 
         sub.lifetime_charged = new_charged;
     }
 
-    sub.prepaid_balance = sub
-        .prepaid_balance
-        .checked_sub(usage_amount)
-        .ok_or(Error::Overflow)?;
+    sub.prepaid_balance = safe_sub(sub.prepaid_balance, usage_amount)?;
 
     if sub.prepaid_balance == 0 {
         validate_status_transition(&sub.status, &SubscriptionStatus::InsufficientBalance)?;

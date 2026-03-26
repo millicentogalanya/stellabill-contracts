@@ -1,5 +1,6 @@
 //! Optional oracle integration for cross-currency pricing.
 
+use crate::safe_math::{safe_add, safe_div, safe_mul, safe_pow, safe_sub};
 use crate::types::{Error, OracleConfig, OraclePrice, Subscription};
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
@@ -105,17 +106,10 @@ pub fn resolve_charge_amount(env: &Env, subscription: &Subscription) -> Result<i
         let token_decimals =
             crate::admin::get_token_decimals(env, &subscription.token).unwrap_or(6);
 
-        let scale = 10i128.checked_pow(token_decimals).ok_or(Error::Overflow)?;
-        let numerator = subscription
-            .amount
-            .checked_mul(scale)
-            .ok_or(Error::Overflow)?;
-        let ceil_adjust = price.price.checked_sub(1).ok_or(Error::Overflow)?;
-        let token_amount = numerator
-            .checked_add(ceil_adjust)
-            .ok_or(Error::Overflow)?
-            .checked_div(price.price)
-            .ok_or(Error::OraclePriceInvalid)?;
+        let scale = safe_pow(10i128, token_decimals)?;
+        let numerator = safe_mul(subscription.amount, scale)?;
+        let ceil_adjust = safe_sub(price.price, 1)?;
+        let token_amount = safe_div(safe_add(numerator, ceil_adjust)?, price.price)?;
 
         if token_amount <= 0 {
             return Err(Error::OraclePriceInvalid);

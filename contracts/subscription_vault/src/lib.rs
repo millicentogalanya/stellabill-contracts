@@ -26,6 +26,9 @@ mod statements;
 mod subscription;
 mod types;
 
+#[cfg(test)]
+mod test_safe_math_regression;
+
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
@@ -847,7 +850,7 @@ impl SubscriptionVault {
             &env,
             subscription_id,
             keep_recent_override,
-        );
+        )?;
         env.events().publish(
             (Symbol::new(&env, "billing_compacted"), subscription_id),
             BillingCompactedEvent {

@@ -3,6 +3,7 @@
 //! **PRs that only add or change read-only/query behavior should edit this file only.**
 
 use crate::types::{CapInfo, DataKey, Error, NextChargeInfo, Subscription, SubscriptionStatus};
+use crate::safe_math::{safe_mul, safe_sub};
 use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
 pub fn get_subscription(env: &Env, subscription_id: u32) -> Result<Subscription, Error> {
@@ -24,15 +25,9 @@ pub fn estimate_topup_for_intervals(
     }
 
     let intervals_i128: i128 = num_intervals.into();
-    let required = sub
-        .amount
-        .checked_mul(intervals_i128)
-        .ok_or(Error::Overflow)?;
+    let required = safe_mul(sub.amount, intervals_i128)?;
 
-    let topup = required
-        .checked_sub(sub.prepaid_balance)
-        .unwrap_or(0)
-        .max(0);
+    let topup = safe_sub(required, sub.prepaid_balance).unwrap_or(0).max(0);
     Ok(topup)
 }
 

@@ -13,7 +13,7 @@
 //! See `docs/reentrancy.md` for details on the reentrancy threat model and mitigation.
 
 use crate::types::MerchantConfig;
-use crate::safe_math::validate_non_negative;
+use crate::safe_math::{safe_add, safe_sub, validate_non_negative};
 use crate::types::Error;
 use soroban_sdk::{token, Address, Env, Symbol};
 
@@ -61,7 +61,7 @@ pub fn credit_merchant_balance_for_token(
 ) -> Result<(), Error> {
     validate_non_negative(amount)?;
     let current = get_merchant_balance_by_token(env, merchant, token_addr);
-    let new_balance = current.checked_add(amount).ok_or(Error::Overflow)?;
+    let new_balance = safe_add(current, amount)?;
     set_merchant_balance(env, merchant, token_addr, &new_balance);
     Ok(())
 }
@@ -102,7 +102,7 @@ pub fn withdraw_merchant_funds_for_token(
         return Err(Error::InsufficientBalance);
     }
 
-    let new_balance = current.checked_sub(amount).ok_or(Error::Overflow)?;
+    let new_balance = safe_sub(current, amount)?;
 
     // ──────────────────────────────────────────────────────────────────────────
     // EFFECTS: Update internal state before external interactions (CEI pattern)
