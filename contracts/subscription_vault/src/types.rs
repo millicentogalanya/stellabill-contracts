@@ -575,6 +575,7 @@ pub struct FundsDepositedEvent {
     pub subscription_id: u32,
     pub subscriber: Address,
     pub amount: i128,
+    pub prepaid_balance: i128,
 }
 
 /// Event emitted when a subscription interval charge succeeds.
@@ -617,7 +618,9 @@ pub struct SubscriptionResumedEvent {
 #[derive(Clone, Debug)]
 pub struct MerchantWithdrawalEvent {
     pub merchant: Address,
+    pub token: Address,
     pub amount: i128,
+    pub remaining_balance: i128,
 }
 
 /// Event emitted when a subscriber withdraws funds after cancellation.
