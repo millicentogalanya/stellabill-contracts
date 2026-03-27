@@ -29,6 +29,8 @@ use crate::types::{
 };
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
+const MIN_SUBSCRIPTION_INTERVAL_SECONDS: u64 = 60;
+
 #[allow(dead_code)]
 pub fn next_id(env: &Env) -> u32 {
     let key = Symbol::new(env, "next_id");
@@ -224,19 +226,30 @@ pub fn do_create_subscription_with_token(
     lifetime_cap: Option<i128>,
 ) -> Result<u32, Error> {
     subscriber.require_auth();
-    validate_non_negative(amount)?;
 
-    if interval_seconds == 0 {
+    if crate::blocklist::is_blocklisted(env, &subscriber) {
+        return Err(Error::SubscriberBlocklisted);
+    }
+
+    validate_non_negative(amount)?;
+    if amount == 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    if interval_seconds < MIN_SUBSCRIPTION_INTERVAL_SECONDS {
         return Err(Error::InvalidInput);
     }
+
     if !crate::admin::is_token_accepted(env, &token) {
         return Err(Error::InvalidInput);
     }
 
-    // Validate lifetime_cap if provided
     if let Some(cap) = lifetime_cap {
         if cap <= 0 {
             return Err(Error::InvalidAmount);
+        }
+        if cap < amount {
+            return Err(Error::InvalidInput);
         }
     }
 
