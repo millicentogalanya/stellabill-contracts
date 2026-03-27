@@ -1,4 +1,3 @@
-
 use crate::{
     can_transition, compute_next_charge_info, get_allowed_transitions, validate_status_transition,
     AdminRotatedEvent, ChargeExecutionResult, Error, MerchantWithdrawalEvent, OraclePrice,
@@ -6,7 +5,7 @@ use crate::{
     MAX_SUBSCRIPTION_ID, FundsDepositedEvent, SubscriptionChargedEvent,
     SubscriptionChargeFailedEvent, LifetimeCapReachedEvent, PartialRefundEvent,
 };
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Ledger as _, Events};
 use soroban_sdk::{
     contract, contractimpl, Address, Env, FromVal, IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
@@ -21,6 +20,22 @@ const T0: u64 = 1_000;
 const INTERVAL: u64 = 30 * 24 * 60 * 60; // 30 days
 const AMOUNT: i128 = 10_000_000; // 10 USDC (6 decimals)
 const PREPAID: i128 = 50_000_000; // 50 USDC
+
+// -- lifecycle action enum for property tests --------------------------------
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LifecycleAction {
+    Pause,
+    Resume,
+    Cancel,
+}
+
+// -- all subscription statuses for property tests ----------------------------
+const ALL_STATUSES: &[SubscriptionStatus] = &[
+    SubscriptionStatus::Active,
+    SubscriptionStatus::Paused,
+    SubscriptionStatus::Cancelled,
+    SubscriptionStatus::InsufficientBalance,
+];
 
 // -- helpers ------------------------------------------------------------------
 
@@ -253,6 +268,83 @@ impl MockOracle {
                 price: 0,
                 timestamp: 0,
             })
+    }
+}
+
+// -- property test helpers ---------------------------------------------------
+
+/// Linear congruential generator for deterministic pseudo-random numbers.
+fn lcg_next(seed: &mut u64) -> u64 {
+    const A: u64 = 1664525;
+    const C: u64 = 1013904223;
+    const M: u64 = u64::MAX;
+    *seed = seed.wrapping_mul(A).wrapping_add(C);
+    *seed
+}
+
+/// Manual state machine rules for validation.
+/// Returns true if transition from `from` to `to` is allowed.
+fn manual_can_transition(from: &SubscriptionStatus, to: &SubscriptionStatus) -> bool {
+    use SubscriptionStatus::*;
+    
+    // Idempotent: same status always allowed
+    if from == to {
+        return true;
+    }
+    
+    match (from, to) {
+        // From Active
+        (Active, Paused) => true,
+        (Active, Cancelled) => true,
+        (Active, InsufficientBalance) => true,
+        
+        // From Paused
+        (Paused, Active) => true,
+        (Paused, Cancelled) => true,
+        (Paused, InsufficientBalance) => false, // Cannot enter grace period while paused
+        
+        // From InsufficientBalance
+        (InsufficientBalance, Active) => true,
+        (InsufficientBalance, Cancelled) => true,
+        (InsufficientBalance, Paused) => false, // Cannot pause during grace period
+        
+        // From Cancelled (terminal state)
+        (Cancelled, _) => false,
+        
+        _ => false,
+    }
+}
+
+/// Generate a random transition action (returns u32: 0=Pause, 1=Resume, 2=Cancel).
+fn random_transition_action(seed: &mut u64) -> u32 {
+    (lcg_next(seed) % 3) as u32
+}
+
+/// Map a numeric action to target status.
+fn transition_action_target(action: u32) -> SubscriptionStatus {
+    match action % 3 {
+        0 => SubscriptionStatus::Paused,
+        1 => SubscriptionStatus::Active,
+        _ => SubscriptionStatus::Cancelled,
+    }
+}
+
+/// Generate a random lifecycle action for entrypoint tests.
+fn random_lifecycle_action(seed: &mut u64) -> LifecycleAction {
+    let val = lcg_next(seed) % 3;
+    match val {
+        0 => LifecycleAction::Pause,
+        1 => LifecycleAction::Resume,
+        _ => LifecycleAction::Cancel,
+    }
+}
+
+/// Map a lifecycle action to its target status.
+fn lifecycle_action_target(action: LifecycleAction) -> SubscriptionStatus {
+    match action {
+        LifecycleAction::Pause => SubscriptionStatus::Paused,
+        LifecycleAction::Resume => SubscriptionStatus::Active,
+        LifecycleAction::Cancel => SubscriptionStatus::Cancelled,
     }
 }
 
@@ -785,8 +877,8 @@ fn test_subscription_struct_with_lifetime_cap() {
 
 #[test]
 fn test_charge_subscription_basic() {
-    let (env, client, _, _admin) = setup_test_env();
-    env.ledger().with_mut(|li| li.timestamp = T0);
+    let test_env = TestEnv::default();
+    test_env.set_timestamp(T0);
 
     let (id, _, _) = create_test_subscription(&env, &client, SubscriptionStatus::Active);
     seed_balance(&env, &client, id, PREPAID);
@@ -1088,10 +1180,10 @@ fn test_deposit_funds_cei_compliance() {
 #[test]
 #[should_panic(expected = "Error(Contract, #402)")]
 fn test_deposit_funds_below_minimum() {
-    let (env, client, _token, _) = setup_test_env();
-    let subscriber = Address::generate(&env);
-    let merchant = Address::generate(&env);
-    let id = client.create_subscription(
+    let test_env = TestEnv::default();
+    let subscriber = Address::generate(&test_env.env);
+    let merchant = Address::generate(&test_env.env);
+    let id = test_env.client.create_subscription(
         &subscriber,
         &merchant,
         &AMOUNT,
@@ -4329,6 +4421,527 @@ fn repeated_pause_resume_cycles_stay_consistent() {
         test_env.client.resume_subscription(&id, &merchant);
         assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Active);
     }
+}
+
+// =============================================================================
+// Lifecycle Edge Case Regression Suite  (Issue #202)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Terminal State Enforcement  sequences that must be fully blocked
+// -----------------------------------------------------------------------------
+
+// Active => Paused => Cancelled => Resume must fail with InvalidStatusTransition.
+#[test]
+fn test_pause_cancel_resume_blocked() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+
+    test_env.client.pause_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Paused);
+
+    test_env.client.cancel_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+
+    let result = test_env.client.try_resume_subscription(&id, &subscriber);
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidStatusTransition)),
+        "resume from Cancelled must fail"
+    );
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+}
+
+// Active => Cancelled => Pause must fail with InvalidStatusTransition.
+#[test]
+fn test_cancel_then_pause_blocked() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+
+    test_env.client.cancel_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+
+    let result = test_env.client.try_pause_subscription(&id, &subscriber);
+    assert_eq!(result, Err(Ok(Error::InvalidStatusTransition)));
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+}
+
+// Cancelled => InsufficientBalance must be impossible.
+// The only public path to InsufficientBalance is a failed charge.
+// A cancelled subscription must reject the charge before any status flip occurs.
+#[test]
+fn test_cancelled_to_insufficient_balance_blocked() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+
+    test_env.client.cancel_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+
+    test_env.jump(INTERVAL + 1);
+    let result = test_env.client.try_charge_subscription(&id);
+    assert!(result.is_err(), "charge on Cancelled must fail");
+    // status must remain Cancelled  never flipped to InsufficientBalance.
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+}
+
+// -----------------------------------------------------------------------------
+// Idempotent Operations — field preservation under repeated calls
+// -----------------------------------------------------------------------------
+
+// Two consecutive pause calls must leave all financial fields unchanged.
+#[test]
+fn test_idempotent_pause_preserves_all_fields() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription_detailed(&test_env.env, &test_env.client, SubscriptionStatus::Active, AMOUNT, INTERVAL);
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+
+    let before = test_env.client.get_subscription(&id);
+
+    test_env.client.pause_subscription(&id, &subscriber);
+    test_env.client.pause_subscription(&id, &subscriber);
+
+    let after = test_env.client.get_subscription(&id);
+
+    assert_eq!(after.prepaid_balance, before.prepaid_balance, "balance must not change");
+    assert_eq!(after.last_payment_timestamp, before.last_payment_timestamp, "timestamp must not change");
+    assert_eq!(after.amount, before.amount, "amount must not change");
+    assert_eq!(after.interval_seconds, before.interval_seconds, "interval must not change");
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Paused);
+}
+
+// two consecutive cancel calls must leave all financial fields unchanged.
+#[test]
+fn test_idempotent_cancel_preserves_all_fields() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription_detailed(&test_env.env, &test_env.client, SubscriptionStatus::Active, AMOUNT, INTERVAL);
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+
+    let before = test_env.client.get_subscription(&id);
+
+    test_env.client.cancel_subscription(&id, &subscriber);
+    test_env.client.cancel_subscription(&id, &subscriber);
+
+    let after = test_env.client.get_subscription(&id);
+
+    assert_eq!(after.prepaid_balance, before.prepaid_balance, "balance must not change on cancel");
+    assert_eq!(after.last_payment_timestamp, before.last_payment_timestamp, "timestamp must not change on cancel");
+    assert_eq!(after.amount, before.amount);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+}
+
+// -----------------------------------------------------------------------------
+// Grace Period (InsufficientBalance) Restrictions
+// -----------------------------------------------------------------------------
+
+// InsufficientBalance => Paused must fail.
+#[test]
+fn test_pause_during_grace_period() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    fixtures::patch_status(&test_env.env, &test_env.client, id, SubscriptionStatus::InsufficientBalance);
+
+    let result = test_env.client.try_pause_subscription(&id, &subscriber);
+    assert_eq!(result, Err(Ok(Error::InvalidStatusTransition)));
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::InsufficientBalance);
+}
+
+// InsufficientBalance => Active via resume must succeed.
+#[test]
+fn test_resume_from_insufficient_balance_succeeds() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    fixtures::patch_status(&test_env.env, &test_env.client, id, SubscriptionStatus::InsufficientBalance);
+
+    test_env.client.resume_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Active);
+}
+
+// InsufficientBalance => Cancelled via cancel must succeed.
+#[test]
+fn test_cancel_during_grace_period() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    fixtures::patch_status(&test_env.env, &test_env.client, id, SubscriptionStatus::InsufficientBalance);
+
+    let result = test_env.client.try_cancel_subscription(&id, &subscriber);
+    assert!(result.is_ok(), "cancel during grace period must succeed");
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+}
+
+// -----------------------------------------------------------------------------
+// §4  Multiple Pause or Resume Cycles
+// -----------------------------------------------------------------------------
+
+// Exactly five consecutive paus or resume cycles must all succeed without corruption.
+#[test]
+fn test_multiple_pause_resume_cycles() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+
+    for cycle in 0..5 {
+        test_env.client.pause_subscription(&id, &subscriber);
+        assert_eq!(
+            test_env.client.get_subscription(&id).status,
+            SubscriptionStatus::Paused,
+            "cycle {cycle}: expected Paused after pause"
+        );
+        test_env.client.resume_subscription(&id, &subscriber);
+        assert_eq!(
+            test_env.client.get_subscription(&id).status,
+            SubscriptionStatus::Active,
+            "cycle {cycle}: expected Active after resume"
+        );
+    }
+}
+
+// Active => Paused =>  Active => Paused => Active rapid sequence.
+#[test]
+fn test_rapid_state_transitions() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+
+    let expected_after_each_step = [
+        SubscriptionStatus::Paused,
+        SubscriptionStatus::Active,
+        SubscriptionStatus::Paused,
+        SubscriptionStatus::Active,
+    ];
+
+    for (i, expected) in expected_after_each_step.iter().enumerate() {
+        if i % 2 == 0 {
+            test_env.client.pause_subscription(&id, &subscriber);
+        } else {
+            test_env.client.resume_subscription(&id, &subscriber);
+        }
+        assert_eq!(
+            test_env.client.get_subscription(&id).status,
+            *expected,
+            "rapid transition step {i} wrong status"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// State Preservation
+// -----------------------------------------------------------------------------
+
+// last_payment_timestamp must not change across pause and resume.
+#[test]
+fn test_timestamp_preserved_across_pause_resume() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+
+    let original_ts = test_env.client.get_subscription(&id).last_payment_timestamp;
+
+    test_env.client.pause_subscription(&id, &subscriber);
+    assert_eq!(
+        test_env.client.get_subscription(&id).last_payment_timestamp,
+        original_ts,
+        "timestamp must not change on pause"
+    );
+
+    // advance time while paused the stored timestamp must still not change.
+    test_env.jump(INTERVAL);
+
+    test_env.client.resume_subscription(&id, &subscriber);
+    assert_eq!(
+        test_env.client.get_subscription(&id).last_payment_timestamp,
+        original_ts,
+        "timestamp must not change on resume"
+    );
+}
+
+// prepaid_balance must not change across pause and resume.
+#[test]
+fn test_balance_preserved_across_pause_resume() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+
+    let original_balance = test_env.client.get_subscription(&id).prepaid_balance;
+
+    test_env.client.pause_subscription(&id, &subscriber);
+    assertions::assert_prepaid_balance(&test_env.client, &id, original_balance);
+
+    test_env.client.resume_subscription(&id, &subscriber);
+    assertions::assert_prepaid_balance(&test_env.client, &id, original_balance);
+}
+
+// prepaid_balance must be retained (not zeroed) after cancel.
+#[test]
+fn test_balance_preserved_on_cancel() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+
+    let original_balance = test_env.client.get_subscription(&id).prepaid_balance;
+
+    test_env.client.cancel_subscription(&id, &subscriber);
+    assertions::assert_prepaid_balance(
+        &test_env.client,
+        &id,
+        original_balance,
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Charging Restrictions
+// -----------------------------------------------------------------------------
+
+// Charge on a Paused subscription must return NotActive and leave balance intact.
+#[test]
+fn test_charge_blocked_while_paused() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+
+    test_env.client.pause_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Paused);
+
+    test_env.jump(INTERVAL + 1);
+
+    let result = test_env.client.try_charge_subscription(&id);
+    assert_eq!(result, Err(Ok(Error::NotActive)), "paused charge must return NotActive");
+    // balance must be entirely untouched.
+    assertions::assert_prepaid_balance(&test_env.client, &id, PREPAID);
+}
+
+// Charge on a Cancelled subscription must return NotActive and leave balance intact.
+#[test]
+fn test_charge_blocked_after_cancel() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+
+    test_env.client.cancel_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+
+    test_env.jump(INTERVAL + 1);
+
+    let result = test_env.client.try_charge_subscription(&id);
+    assert_eq!(result, Err(Ok(Error::NotActive)), "cancelled charge must return NotActive");
+    assertions::assert_prepaid_balance(&test_env.client, &id, PREPAID);
+}
+
+// Resume then immediately charge must succeed when the interval has elapsed
+// (the pause must not reset or advance the billing clock).
+#[test]
+fn test_resume_and_charge_immediately() {
+    let test_env = TestEnv::default();
+    test_env.set_timestamp(T0);
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+
+    // Pause while the interval elapses.
+    test_env.client.pause_subscription(&id, &subscriber);
+    test_env.jump(INTERVAL + 1);
+
+    // Resume  subscription is Active again and interval has elapsed.
+    test_env.client.resume_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Active);
+
+    let result = test_env.client.try_charge_subscription(&id);
+    assert!(result.is_ok(), "charge after resume with elapsed interval must succeed");
+    assertions::assert_prepaid_balance(&test_env.client, &id, PREPAID - AMOUNT);
+}
+
+// -----------------------------------------------------------------------------
+// Multi-Subscription Scenarios
+// -----------------------------------------------------------------------------
+
+// Three subscriptions sharing one merchant, each in a different state.
+// Mutating one must never affect the others.
+#[test]
+fn test_shared_merchant_multiple_states() {
+    let test_env = TestEnv::default();
+    let merchant = Address::generate(&test_env.env);
+
+    let sub_a_sub = Address::generate(&test_env.env);
+    let sub_b_sub = Address::generate(&test_env.env);
+    let sub_c_sub = Address::generate(&test_env.env);
+
+    let id_a = test_env.client.create_subscription(&sub_a_sub, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    let id_b = test_env.client.create_subscription(&sub_b_sub, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+    let id_c = test_env.client.create_subscription(&sub_c_sub, &merchant, &AMOUNT, &INTERVAL, &false, &None::<i128>);
+
+    // Set: A stays Active, B => Paused, C => Cancelled.
+    test_env.client.pause_subscription(&id_b, &sub_b_sub);
+    test_env.client.cancel_subscription(&id_c, &sub_c_sub);
+
+    assertions::assert_status(&test_env.client, &id_a, SubscriptionStatus::Active);
+    assertions::assert_status(&test_env.client, &id_b, SubscriptionStatus::Paused);
+    assertions::assert_status(&test_env.client, &id_c, SubscriptionStatus::Cancelled);
+
+    // Mutate A — B and C must be unaffected.
+    test_env.client.pause_subscription(&id_a, &sub_a_sub);
+    assertions::assert_status(&test_env.client, &id_a, SubscriptionStatus::Paused);
+    assertions::assert_status(&test_env.client, &id_b, SubscriptionStatus::Paused);
+    assertions::assert_status(&test_env.client, &id_c, SubscriptionStatus::Cancelled);
+
+    // Resume B — A and C must be unaffected.
+    test_env.client.resume_subscription(&id_b, &sub_b_sub);
+    assertions::assert_status(&test_env.client, &id_a, SubscriptionStatus::Paused);
+    assertions::assert_status(&test_env.client, &id_b, SubscriptionStatus::Active);
+    assertions::assert_status(&test_env.client, &id_c, SubscriptionStatus::Cancelled);
+}
+
+// Pause or resume must work identically regardless of billing interval.
+#[test]
+fn test_pause_with_varying_intervals() {
+    let test_env = TestEnv::default();
+    let m = Address::generate(&test_env.env);
+
+    let daily   = 24 * 60 * 60u64;
+    let weekly  = 7  * 24 * 60 * 60u64;
+    let monthly = 30 * 24 * 60 * 60u64;
+
+    let s1 = Address::generate(&test_env.env);
+    let s2 = Address::generate(&test_env.env);
+    let s3 = Address::generate(&test_env.env);
+
+    let id1 = test_env.client.create_subscription(&s1, &m, &AMOUNT, &daily,   &false, &None::<i128>);
+    let id2 = test_env.client.create_subscription(&s2, &m, &AMOUNT, &weekly,  &false, &None::<i128>);
+    let id3 = test_env.client.create_subscription(&s3, &m, &AMOUNT, &monthly, &false, &None::<i128>);
+
+    // All three should pause without error regardless of interval.
+    test_env.client.pause_subscription(&id1, &s1);
+    test_env.client.pause_subscription(&id2, &s2);
+    test_env.client.pause_subscription(&id3, &s3);
+
+    assertions::assert_status(&test_env.client, &id1, SubscriptionStatus::Paused);
+    assertions::assert_status(&test_env.client, &id2, SubscriptionStatus::Paused);
+    assertions::assert_status(&test_env.client, &id3, SubscriptionStatus::Paused);
+
+    // All three should resume without error.
+    test_env.client.resume_subscription(&id1, &s1);
+    test_env.client.resume_subscription(&id2, &s2);
+    test_env.client.resume_subscription(&id3, &s3);
+
+    assertions::assert_status(&test_env.client, &id1, SubscriptionStatus::Active);
+    assertions::assert_status(&test_env.client, &id2, SubscriptionStatus::Active);
+    assertions::assert_status(&test_env.client, &id3, SubscriptionStatus::Active);
+}
+
+// Batch charge with mixed states: the failed items must not corrupt the
+// successful item's balance or the batch's overall accounting.
+#[test]
+fn test_batch_charge_with_paused_and_cancelled() {
+    let test_env = TestEnv::default();
+    test_env.set_timestamp(T0);
+
+    let (id_active,    sub_a, _) = fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    let (id_paused,    sub_b, _) = fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    let (id_cancelled, sub_c, _) = fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+
+    test_env.stellar_token_client().mint(&sub_a, &PREPAID);
+    test_env.stellar_token_client().mint(&sub_b, &PREPAID);
+    test_env.stellar_token_client().mint(&sub_c, &PREPAID);
+    test_env.client.deposit_funds(&id_active,    &sub_a, &PREPAID);
+    test_env.client.deposit_funds(&id_paused,    &sub_b, &PREPAID);
+    test_env.client.deposit_funds(&id_cancelled, &sub_c, &PREPAID);
+
+    test_env.client.pause_subscription(&id_paused, &sub_b);
+    test_env.client.cancel_subscription(&id_cancelled, &sub_c);
+
+    test_env.jump(INTERVAL + 1);
+
+    let ids = soroban_sdk::Vec::from_array(&test_env.env, [id_active, id_paused, id_cancelled]);
+    let results = test_env.client.batch_charge(&ids);
+
+    assert_eq!(results.len(), 3);
+    assert!(results.get(0).unwrap().success,  "active must succeed");
+    assert!(!results.get(1).unwrap().success, "paused must fail");
+    assert!(!results.get(2).unwrap().success, "cancelled must fail");
+
+    // Only the active subscription's balance was deducted.
+    assertions::assert_prepaid_balance(&test_env.client, &id_active,    PREPAID - AMOUNT);
+    assertions::assert_prepaid_balance(&test_env.client, &id_paused,    PREPAID);
+    assertions::assert_prepaid_balance(&test_env.client, &id_cancelled, PREPAID);
+}
+
+// -----------------------------------------------------------------------------
+// Issue-specified end-to-end flows
+// -----------------------------------------------------------------------------
+
+// pause => cancel => withdraw — the explicit example from the issue.
+#[test]
+fn test_pause_cancel_withdraw_flow() {
+    let test_env = TestEnv::default();
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+
+    let original_balance = test_env.client.get_subscription(&id).prepaid_balance;
+
+    // Pause — balance unchanged.
+    test_env.client.pause_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Paused);
+    assertions::assert_prepaid_balance(&test_env.client, &id, original_balance);
+
+    // Cancel — balance still retained for withdrawal.
+    test_env.client.cancel_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Cancelled);
+    assertions::assert_prepaid_balance(&test_env.client, &id, original_balance);
+
+    // Withdraw — balance zeroed, tokens returned to subscriber.
+    test_env.client.withdraw_subscriber_funds(&id, &subscriber);
+    assertions::assert_prepaid_balance(&test_env.client, &id, 0);
+
+    let wallet = soroban_sdk::token::Client::new(&test_env.env, &test_env.token)
+        .balance(&subscriber);
+    assert_eq!(wallet, original_balance, "subscriber must receive full prepaid back");
+}
+
+// insufficient => deposit => resume — the explicit example from the issue.
+#[test]
+fn test_insufficient_deposit_resume_flow() {
+    let test_env = TestEnv::default();
+    test_env.set_timestamp(T0);
+    let (id, subscriber, _) =
+        fixtures::create_subscription(&test_env.env, &test_env.client, SubscriptionStatus::Active);
+
+    // Simulate InsufficientBalance state.
+    fixtures::patch_status(&test_env.env, &test_env.client, id, SubscriptionStatus::InsufficientBalance);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::InsufficientBalance);
+
+    // Subscriber tops up  balance credited regardless of status.
+    test_env.stellar_token_client().mint(&subscriber, &PREPAID);
+    test_env.client.deposit_funds(&id, &subscriber, &PREPAID);
+    assertions::assert_prepaid_balance(&test_env.client, &id, PREPAID);
+
+    // Resume brings subscription back to Active.
+    test_env.client.resume_subscription(&id, &subscriber);
+    assertions::assert_status(&test_env.client, &id, SubscriptionStatus::Active);
+
+    // A charge must now succeed once the interval elapses.
+    test_env.jump(INTERVAL + 1);
+    let result = test_env.client.try_charge_subscription(&id);
+    assert!(result.is_ok(), "charge after insufficient→deposit→resume must succeed");
+    assertions::assert_prepaid_balance(&test_env.client, &id, PREPAID - AMOUNT);
 }
 
 // ── Oracle validation tests ───────────────────────────────────────────────────

@@ -35,6 +35,10 @@ mod test_refactor_check;
 mod test_utils;
 #[cfg(test)]
 mod test_governance;
+#[cfg(test)]
+mod test_insufficient_balance;
+#[cfg(test)]
+mod test_security;
 
 
 #[cfg(test)]
